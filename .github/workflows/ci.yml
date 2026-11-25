@@ -1,17 +1,15 @@
 name: CI
 
-# Pull requests: check and local tests only, no secrets.
-# Push to main: the same, then deploy and test the deployment.
+# Runs only on a push to main (including a merge), to save Actions minutes:
+# check and local tests, then deploy and test the deployment.
 on:
-  pull_request:
-    branches: [main]
   push:
     branches: [main]
 
 permissions:
   contents: read
 
-# One run per branch at a time, so an older commit cannot deploy over a newer one.
+# One run at a time, so an older commit cannot deploy over a newer one.
 concurrency:
   group: ci-${{ github.ref }}
 
@@ -30,7 +28,6 @@ jobs:
 
   deploy:
     needs: test
-    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

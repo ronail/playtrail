@@ -115,10 +115,10 @@ Wait a minute between runs against a deployment, because of the rate limits.
 
 ## CI
 
-[The workflow](.github/workflows/ci.yml) runs the type check and local tests on
-pull requests to `main`. On a push to `main` (including a merge) it also deploys
-and runs the tests against the deployment. A failed test does not roll the
-deployment back.
+[The workflow](.github/workflows/ci.yml) runs only on a push to `main` (including
+a merge): type check, local tests, deploy, then tests against the deployment.
+Pull requests get no checks, so run `npm test` and `npm run check` before merging.
+A failed deployment test does not roll the deployment back.
 
 It needs the one-time setup under [Deploy](#deploy) (bucket, lifecycle rule,
 `MASTER_KEY`) and these repository settings. Nothing about your account is committed.
