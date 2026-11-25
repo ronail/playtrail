@@ -1,4 +1,5 @@
 node_modules
 .wrangler
+wrangler.limits.toml
 .dev.vars
 .superpowers

@@ -1,11 +1,12 @@
 // Black-box HTTP tests. Local by default; BASE_URL=https://... tests a deployment.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { spawn, execFileSync } from "node:child_process";
+import { spawn, spawnSync, execFileSync } from "node:child_process";
 import { createHmac, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 
 const remote = process.env.BASE_URL;
 const base = remote?.replace(/\/$/, "") ?? "http://localhost:8787";
@@ -18,10 +19,31 @@ const CORS = {
 };
 // Fresh local state per run: rate limit counts and objects would otherwise carry over.
 const state = remote ? undefined : mkdtempSync(join(tmpdir(), "playtrail-"));
+// Local runs expect the limits `npm run dev` would use: wrangler.toml unless overridden.
+const limits = {
+  register: Number(process.env.REGISTER_LIMIT || 5),
+  upload: Number(process.env.UPLOAD_LIMIT || 10),
+};
 let server, a, b;
+let ips = 0;
+
+// A low limit can refuse the suite's own requests: wait for the next window.
+const retry = async (send) => {
+  let res = await send();
+  for (let i = 0; res.status === 429 && i < 14; i++) {
+    await sleep(5000);
+    res = await send();
+  }
+  return res;
+};
+
+// The local server trusts CF-Connecting-IP, so each address gets its own register allowance.
+// A deployment sets the header itself.
+const postRegister = (ip = `203.0.113.${++ips}`) =>
+  fetch(`${base}/v1/register`, { method: "POST", headers: remote ? {} : { "CF-Connecting-IP": ip } });
 
 const register = async () => {
-  const res = await fetch(`${base}/v1/register`, { method: "POST" });
+  const res = await retry(() => postRegister());
   assert.equal(res.status, 200);
   return res.json();
 };
@@ -30,13 +52,14 @@ const sign = (key, id, batch, body) =>
   createHmac("sha256", Buffer.from(key, "base64")).update(`${id}\n${batch}\n`).update(body).digest("base64");
 
 // signature: undefined = sign correctly, null = omit the header
-const put = (client, body, { batch = randomUUID(), key = client.key, signature, signed = body, stream = false } = {}) => {
+const put = (client, body, { batch = randomUUID(), key = client.key, signature, signed = body, stream = false, wait = true } = {}) => {
   const sig = signature === undefined ? sign(key, client.client_id, batch, signed) : signature;
-  return fetch(`${base}/v1/logs/${client.client_id}/${batch}`, {
+  const send = () => fetch(`${base}/v1/logs/${client.client_id}/${batch}`, {
     method: "PUT",
     headers: { "content-type": "application/x-ndjson", ...(sig === null ? {} : { "x-signature": sig }) },
     ...(stream ? { body: new Blob([body]).stream(), duplex: "half" } : { body }),
   });
+  return wait ? retry(send) : send();
 };
 
 const readObject = (path) =>
@@ -51,8 +74,9 @@ const assertCors = (res) => {
 
 before(async () => {
   if (!remote) {
-    server = spawn(wrangler, ["dev", "--port", "8787", "--var", "MASTER_KEY:test-only-key", "--persist-to", state], {
-      stdio: "ignore",
+    const args = ["scripts/wrangler.mjs", "dev", "--port", "8787", "--var", "MASTER_KEY:test-only-key", "--persist-to", state];
+    server = spawn(process.execPath, args, {
+      stdio: ["ignore", "ignore", "inherit"], // shows why it did not start
       detached: true,
     });
     const deadline = Date.now() + 30_000;
@@ -61,10 +85,10 @@ before(async () => {
       await new Promise((r) => setTimeout(r, 250));
     }
   }
-  // Only two registrations are shared: the limit is 5 per minute.
+  // Only two registrations are shared, to stay within a deployment's limit.
   a = await register();
   b = await register();
-}, { timeout: 60_000 });
+}, { timeout: 150_000 });
 
 after(() => {
   if (server && server.exitCode === null) process.kill(-server.pid);
@@ -145,11 +169,32 @@ test("cors", async () => {
   assertCors(denied);
 });
 
-// The deployed limit is approximate and per location, so this is local only.
+test("an invalid limit override stops before wrangler runs", () => {
+  const env = { ...process.env, REGISTER_LIMIT: "", UPLOAD_LIMIT: "abc" };
+  const run = spawnSync(process.execPath, ["scripts/wrangler.mjs", "deploy", "--dry-run"], { env, encoding: "utf8" });
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, /UPLOAD_LIMIT must be a positive whole number/);
+  assert.equal(run.stdout, "");
+});
+
+// Exactly `limit` requests succeed, then 429. The local simulator counts in fixed windows
+// aligned to the clock, so don't start just before one ends.
+// ponytail: assumes `limit` requests take under 10 s; huge overrides could straddle a window.
+const assertLimit = async (limit, status, send) => {
+  const left = 60_000 - (Date.now() % 60_000);
+  if (left < 10_000) await sleep(left + 100);
+  for (let i = 1; i <= limit; i++) assert.equal((await send()).status, status, `request ${i} of ${limit}`);
+  const refused = await send();
+  assert.equal(refused.status, 429, `request ${limit + 1}`);
+  assertCors(refused);
+};
+
+// Deployed limits are approximate and per location, so these are local only.
 test("register is rate limited", { skip: !!remote }, async () => {
-  for (let i = 0; i < 10; i++) {
-    const res = await fetch(`${base}/v1/register`, { method: "POST" });
-    if (res.status === 429) return assertCors(res);
-  }
-  assert.fail("no 429 after 10 registrations");
+  await assertLimit(limits.register, 200, () => postRegister("198.51.100.1"));
+});
+
+test("upload is rate limited", { skip: !!remote }, async () => {
+  const client = await register();
+  await assertLimit(limits.upload, 201, () => put(client, "x\n", { wait: false }));
 });
