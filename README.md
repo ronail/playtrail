@@ -113,6 +113,31 @@ BASE_URL=https://your-worker.workers.dev npm test   # against a deployment
 
 Wait a minute between runs against a deployment, because of the rate limits.
 
+## CI
+
+[The workflow](.github/workflows/ci.yml) runs the type check and local tests on
+pull requests to `main`. On a push to `main` (including a merge) it also deploys
+and runs the tests against the deployment. A failed test does not roll the
+deployment back.
+
+It needs the one-time setup under [Deploy](#deploy) (bucket, lifecycle rule,
+`MASTER_KEY`) and three repository secrets:
+
+| Secret | Value |
+|---|---|
+| `CLOUDFLARE_API_TOKEN` | A custom API token for your account with **Workers Scripts: Edit**, **Workers R2 Storage: Read** and **Account Settings: Read** |
+| `CLOUDFLARE_ACCOUNT_ID` | Your account ID (`npx wrangler whoami`) |
+| `BASE_URL` | Your deployment with no trailing slash, such as `https://playtrail.example.workers.dev` |
+
+```sh
+gh secret set CLOUDFLARE_API_TOKEN   # paste at the prompt
+gh secret set CLOUDFLARE_ACCOUNT_ID
+gh secret set BASE_URL
+```
+
+Each run against the deployment leaves a few test objects, which expire with the
+rest.
+
 ## What it is not
 
 - Not a multiplayer sync server: no read API, match grouping or move validation.
