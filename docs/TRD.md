@@ -260,6 +260,7 @@ Checked on a deployment, 2026-11-25:
 - A 40,000-byte body returned 413, with and without `Content-Length`. A body that
   never ends timed out instead, so early rejection of it is confirmed only
   locally. Cause not investigated.
+- A browser page on another origin registered (200) and uploaded (201).
 
 Still to verify:
 
