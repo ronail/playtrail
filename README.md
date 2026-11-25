@@ -101,6 +101,22 @@ Requests fail with 500 until `MASTER_KEY` is set. Then set a billing
 notification in the Cloudflare dashboard, keep the bucket private, and give
 readers a read-only R2 token.
 
+### Rate limits
+
+Defaults are 5 registrations per IP and 10 uploads per client, each per 60
+seconds. To change either, set `REGISTER_LIMIT` or `UPLOAD_LIMIT` (a positive
+whole number) in the shell that deploys:
+
+```sh
+REGISTER_LIMIT=20 UPLOAD_LIMIT=60 npm run deploy
+```
+
+The limits are fixed at deploy time, so setting them as Worker variables does
+nothing. Each deploy applies only what is set then: a later one without them goes
+back to the defaults. `npx wrangler deploy` ignores them. `npm run dev` and
+`npm test` honour them too. The 60 second period is not configurable here
+(Cloudflare allows only 10 or 60). For CI, see [CI](#ci).
+
 ## Develop
 
 ```sh
@@ -111,7 +127,8 @@ npm run check    # type check
 BASE_URL=https://your-worker.workers.dev npm test   # against a deployment
 ```
 
-Wait a minute between runs against a deployment, because of the rate limits.
+A run against a deployment waits and retries when it hits a rate limit, so it can
+take a few minutes with low limits or right after another run.
 
 ## CI
 
@@ -128,12 +145,20 @@ It needs the one-time setup under [Deploy](#deploy) (bucket, lifecycle rule,
 | `CLOUDFLARE_API_TOKEN` | secret | A custom API token for your account with **Workers Scripts: Edit**, **Workers R2 Storage: Read** and **Account Settings: Read** |
 | `CLOUDFLARE_ACCOUNT_ID` | variable | Your account ID (`npx wrangler whoami`) |
 | `BASE_URL` | variable | Your deployment with no trailing slash, such as `https://playtrail.example.workers.dev` |
+| `REGISTER_LIMIT` | variable, optional | Registrations per IP per 60 s (default 5) |
+| `UPLOAD_LIMIT` | variable, optional | Uploads per client per 60 s (default 10) |
 
 ```sh
 gh secret set CLOUDFLARE_API_TOKEN   # paste at the prompt
 gh variable set CLOUDFLARE_ACCOUNT_ID
 gh variable set BASE_URL
+gh variable set UPLOAD_LIMIT --body 60       # optional
+gh variable delete UPLOAD_LIMIT              # back to the default
 ```
+
+A changed limit applies at the next deploy, not when you set it. An invalid value
+fails the deploy step, leaving the previous deployment in place. The `test` job
+(pull requests and pushes) always uses the defaults.
 
 Variables are not masked, so the account ID and URL can appear in this public
 repo's run logs. Use secrets instead if that matters.

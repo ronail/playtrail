@@ -37,6 +37,15 @@ namespace_id = "1002"
 simple = { limit = 10, period = 60 }
 ```
 
+The two `limit` values above are defaults. Rate limit bindings are deploy-time
+config, so a Worker variable cannot change them. Instead, `npm run deploy` and
+`npm run dev` go through [scripts/wrangler.mjs](../scripts/wrangler.mjs): if
+`REGISTER_LIMIT` or `UPLOAD_LIMIT` is set in the shell (CI passes the repository
+variables of the same names), it writes `wrangler.limits.toml` with those limits
+and runs Wrangler with it. Unset or empty means the default. Anything but a
+positive whole number stops before Wrangler runs. `period` stays 60; Cloudflare
+allows only 10 or 60.
+
 ```sh
 npx wrangler r2 bucket create playtrail-logs
 npx wrangler r2 bucket lifecycle add playtrail-logs --name expire-14d --expire-days 14
@@ -264,6 +273,9 @@ Checked on a deployment, 2026-11-25:
 
 Still to verify:
 
+- An overridden rate limit on a deployment. Overrides are tested only locally and
+  with `wrangler deploy --dry-run`. Cloudflare documents no minimum or maximum
+  for `limit`.
 - Expiry: object
   `ce3b948d-e5d8-4ca6-8386-c47f58712c1e/limit-check-008b08d0-5bcd-4488-88ed-32f583560528.ndjson`
   (uploaded 2026-11-25) should be gone by 2026-12-11.

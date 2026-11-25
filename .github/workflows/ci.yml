@@ -51,6 +51,9 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          # Optional: unset means the limits in wrangler.toml.
+          REGISTER_LIMIT: ${{ vars.REGISTER_LIMIT }}
+          UPLOAD_LIMIT: ${{ vars.UPLOAD_LIMIT }}
       - run: npm test
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
