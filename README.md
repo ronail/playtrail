@@ -7,8 +7,8 @@ object, and storage deletes it 14 days after upload. No database, no business
 logic, no conflict resolution. Designed to cost about $0 at low volume on
 Cloudflare Workers + R2.
 
-> **Status: design only.** There is no server code to deploy yet. See the
-> [PRD](docs/PRD.md) and [TRD](docs/TRD.md).
+> **Status: v1.** Verified against a real R2 bucket, except that the 14-day expiry
+> has not been observed yet. See the [PRD](docs/PRD.md) and [TRD](docs/TRD.md).
 
 ## How it works
 
@@ -40,6 +40,106 @@ PUT /v1/logs/7f3c…/01JDQ8… HTTP/1.1
 Content-Type: application/x-ndjson
 X-Signature: base64(HMAC-SHA256(key, client_id + "\n" + batch_id + "\n" + body))
 ```
+
+`register` returns `key` as base64. **Decode it first:** the HMAC key is the
+decoded bytes, not the base64 text. IDs are 1 to 64 characters from `A-Z`, `a-z`,
+`0-9`, `_` and `-`; a ULID or UUID works as a `batch_id`.
+
+### Client example
+
+Save as `client.mjs` and run with `node client.mjs` (Node 20 or later). Set
+`BASE_URL` to your deployment.
+
+```js
+const base = process.env.BASE_URL ?? "http://localhost:8787";
+const enc = new TextEncoder();
+
+// Once per install: store both values.
+const { client_id, key } = await (await fetch(`${base}/v1/register`, { method: "POST" })).json();
+
+const hmacKey = await crypto.subtle.importKey(
+  "raw",
+  Uint8Array.from(atob(key), (c) => c.charCodeAt(0)), // decoded bytes
+  { name: "HMAC", hash: "SHA-256" },
+  false,
+  ["sign"],
+);
+
+// Once per batch: reuse batch_id and body on every retry.
+const batchId = crypto.randomUUID();
+const body = JSON.stringify({ seq: 1, ts: new Date().toISOString(), type: "turn_ended", data: {} }) + "\n";
+const mac = await crypto.subtle.sign("HMAC", hmacKey, enc.encode(`${client_id}\n${batchId}\n${body}`));
+
+const res = await fetch(`${base}/v1/logs/${client_id}/${batchId}`, {
+  method: "PUT",
+  headers: {
+    "Content-Type": "application/x-ndjson",
+    "X-Signature": btoa(String.fromCharCode(...new Uint8Array(mac))),
+  },
+  body,
+});
+console.log(res.status); // 201 stored, 200 already stored
+```
+
+Keep the batch until you get 201 or 200. See the
+[status codes](docs/TRD.md#put-v1logsclient_idbatch_id) for the rest.
+
+## Deploy
+
+You need Node 22 or later and a Cloudflare account with R2 enabled.
+
+```sh
+npm install
+npx wrangler login
+npx wrangler r2 bucket create playtrail-logs
+npx wrangler r2 bucket lifecycle add playtrail-logs --name expire-14d --expire-days 14
+npm run deploy
+openssl rand -base64 32 | npx wrangler secret put MASTER_KEY
+```
+
+Requests fail with 500 until `MASTER_KEY` is set. Then set a billing
+notification in the Cloudflare dashboard, keep the bucket private, and give
+readers a read-only R2 token.
+
+## Develop
+
+```sh
+echo "MASTER_KEY=local-only-key" > .dev.vars
+npm run dev      # http://localhost:8787
+npm test         # starts its own server; stop `npm run dev` first
+npm run check    # type check
+BASE_URL=https://your-worker.workers.dev npm test   # against a deployment
+```
+
+Wait a minute between runs against a deployment, because of the rate limits.
+
+## CI
+
+[The workflow](.github/workflows/ci.yml) runs the type check and local tests on
+pull requests to `main`. On a push to `main` (including a merge) it also deploys
+and runs the tests against the deployment. A failed test does not roll the
+deployment back.
+
+It needs the one-time setup under [Deploy](#deploy) (bucket, lifecycle rule,
+`MASTER_KEY`) and these repository settings. Nothing about your account is committed.
+
+| Name | Kind | Value |
+|---|---|---|
+| `CLOUDFLARE_API_TOKEN` | secret | A custom API token for your account with **Workers Scripts: Edit**, **Workers R2 Storage: Read** and **Account Settings: Read** |
+| `CLOUDFLARE_ACCOUNT_ID` | variable | Your account ID (`npx wrangler whoami`) |
+| `BASE_URL` | variable | Your deployment with no trailing slash, such as `https://playtrail.example.workers.dev` |
+
+```sh
+gh secret set CLOUDFLARE_API_TOKEN   # paste at the prompt
+gh variable set CLOUDFLARE_ACCOUNT_ID
+gh variable set BASE_URL
+```
+
+Variables are not masked, so the account ID and URL can appear in this public
+repo's run logs. Use secrets instead if that matters.
+
+Each run against the deployment leaves a few test objects, which expire with the
+rest.
 
 ## What it is not
 
