@@ -7,8 +7,8 @@ object, and storage deletes it 14 days after upload. No database, no business
 logic, no conflict resolution. Designed to cost about $0 at low volume on
 Cloudflare Workers + R2.
 
-> **Status: v1.** Tested locally; not yet verified against a real R2 bucket. See
-> the [PRD](docs/PRD.md) and [TRD](docs/TRD.md).
+> **Status: v1.** Verified against a real R2 bucket, except that the 14-day expiry
+> has not been observed yet. See the [PRD](docs/PRD.md) and [TRD](docs/TRD.md).
 
 ## How it works
 

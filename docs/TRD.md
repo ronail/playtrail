@@ -247,12 +247,26 @@ and [R2](https://developers.cloudflare.com/r2/pricing/) pricing.
 | Shared bearer token | Public once shipped, and allows spoofing |
 | Delete a client's data after 14 days idle | Needs a sweep job that outgrows the Free plan and stored progress |
 
-## To verify during implementation
+## Verification
 
-- Put-if-absent on a real bucket (see above).
-- Lifecycle command syntax and how long after 14 days objects disappear.
-- Rate limit binding availability on the Free plan.
-- Turnstile `siteverify` and App Attest quotas.
+Checked on a deployment, 2026-11-25:
+
+- Put-if-absent works on a real bucket: a second upload with a different body
+  returned 200 and left the first unchanged. The head-then-put fallback is not
+  needed.
+- The lifecycle command works and the `expire-14d` rule is listed.
+- Both rate limit bindings deployed and returned 429 (register after 5, upload
+  after 11 in one run; the limits are approximate).
+- A 40,000-byte body returned 413, with and without `Content-Length`. A body that
+  never ends timed out instead, so early rejection of it is confirmed only
+  locally. Cause not investigated.
+
+Still to verify:
+
+- Expiry: object
+  `ce3b948d-e5d8-4ca6-8386-c47f58712c1e/limit-check-008b08d0-5bcd-4488-88ed-32f583560528.ndjson`
+  (uploaded 2026-11-25) should be gone by 2026-12-11.
+- Turnstile `siteverify` and App Attest quotas (phase 2).
 
 ## References
 
