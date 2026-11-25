@@ -106,6 +106,18 @@ test("streamed oversize body", async () => {
   assert.equal((await put(a, "x".repeat(40000), { stream: true })).status, 413);
 });
 
+// A body that never ends: only a Worker that stops reading at the cap can answer.
+test("oversize body is rejected without reading it all", async () => {
+  const body = new ReadableStream({ start: (c) => c.enqueue(new Uint8Array(40000)) });
+  const res = await fetch(`${base}/v1/logs/a/b`, {
+    method: "PUT",
+    body,
+    duplex: "half",
+    signal: AbortSignal.timeout(5000),
+  });
+  assert.equal(res.status, 413);
+});
+
 test("bad paths", async () => {
   const cases = [
     ["PUT", `/v1/logs/${"a".repeat(65)}/b`],

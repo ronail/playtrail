@@ -32,16 +32,28 @@ async function register(req: Request, env: Env): Promise<Response> {
   return Response.json({ client_id, key });
 }
 
+// Stops at the cap: anyone can send a body, so never buffer more than we accept.
+async function readBody(req: Request): Promise<Uint8Array | null> {
+  const buf = new Uint8Array(MAX);
+  let size = 0;
+  for await (const chunk of req.body ?? []) {
+    if (size + chunk.byteLength > MAX) return null;
+    buf.set(chunk, size);
+    size += chunk.byteLength;
+  }
+  return buf.subarray(0, size);
+}
+
 async function upload(req: Request, env: Env, id: string, batch: string): Promise<Response> {
   if (Number(req.headers.get("content-length") ?? 0) > MAX) return reply(413, "too large"); // early reject only
-  const body = await req.arrayBuffer();
+  const body = await readBody(req);
+  if (!body) return reply(413, "too large"); // the real check
   if (body.byteLength === 0) return reply(400, "empty");
-  if (body.byteLength > MAX) return reply(413, "too large"); // the real check
 
   const prefix = enc.encode(`${id}\n${batch}\n`);
   const msg = new Uint8Array(prefix.length + body.byteLength);
   msg.set(prefix);
-  msg.set(new Uint8Array(body), prefix.length);
+  msg.set(body, prefix.length);
   let ok = false;
   try {
     const sig = Uint8Array.from(atob(req.headers.get("x-signature") ?? ""), (c) => c.charCodeAt(0));
