@@ -3,6 +3,9 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
 import { createHmac, randomUUID } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const remote = process.env.BASE_URL;
 const base = remote?.replace(/\/$/, "") ?? "http://localhost:8787";
@@ -13,6 +16,8 @@ const CORS = {
   "access-control-allow-headers": "Content-Type, X-Signature",
   "access-control-max-age": "86400",
 };
+// Fresh local state per run: rate limit counts and objects would otherwise carry over.
+const state = remote ? undefined : mkdtempSync(join(tmpdir(), "playtrail-"));
 let server, a, b;
 
 const register = async () => {
@@ -35,7 +40,7 @@ const put = (client, body, { batch = randomUUID(), key = client.key, signature, 
 };
 
 const readObject = (path) =>
-  execFileSync(wrangler, ["r2", "object", "get", `playtrail-logs/${path}`, "--pipe", remote ? "--remote" : "--local"], {
+  execFileSync(wrangler, ["r2", "object", "get", `playtrail-logs/${path}`, "--pipe", ...(remote ? ["--remote"] : ["--local", "--persist-to", state])], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -46,7 +51,7 @@ const assertCors = (res) => {
 
 before(async () => {
   if (!remote) {
-    server = spawn(wrangler, ["dev", "--port", "8787", "--var", "MASTER_KEY:test-only-key"], {
+    server = spawn(wrangler, ["dev", "--port", "8787", "--var", "MASTER_KEY:test-only-key", "--persist-to", state], {
       stdio: "ignore",
       detached: true,
     });
@@ -57,12 +62,13 @@ before(async () => {
     }
   }
   // Only two registrations are shared: the limit is 5 per minute.
-  a = await register().catch(() => undefined);
-  b = await register().catch(() => undefined);
+  a = await register();
+  b = await register();
 }, { timeout: 60_000 });
 
 after(() => {
   if (server && server.exitCode === null) process.kill(-server.pid);
+  if (state) rmSync(state, { recursive: true, force: true });
 });
 
 test("register returns id and key", () => {
