@@ -13,6 +13,7 @@ const CORS = {
   "Access-Control-Allow-Headers": "Content-Type, X-Signature",
   "Access-Control-Max-Age": "86400",
 };
+const LOCAL_HOSTS = ["localhost", "127.0.0.1", "[::1]"]; // where plain HTTP is allowed
 const enc = new TextEncoder();
 
 const reply = (status: number, text?: string) => new Response(text ?? null, { status });
@@ -24,12 +25,20 @@ const hmacKey = (raw: BufferSource, use: "sign" | "verify") =>
 const clientKey = async (env: Env, id: string) =>
   crypto.subtle.sign("HMAC", await hmacKey(enc.encode(env.MASTER_KEY), "sign"), enc.encode(id));
 
+// One host usually holds a whole IPv6 /64, so limit by that, not by address.
+function limitKey(ip: string): string {
+  if (!ip.includes(":") || ip.includes(".")) return ip; // IPv4, or IPv4-mapped
+  const [head, tail] = ip.split("::").map((part) => (part ? part.split(":") : []));
+  const groups = tail ? [...head, ...Array<string>(8 - head.length - tail.length).fill("0"), ...tail] : head;
+  return groups.slice(0, 4).join(":");
+}
+
 async function register(req: Request, env: Env): Promise<Response> {
   const ip = req.headers.get("CF-Connecting-IP") ?? "local";
-  if (!(await env.REGISTER_LIMIT.limit({ key: ip })).success) return reply(429, "slow down");
+  if (!(await env.REGISTER_LIMIT.limit({ key: limitKey(ip) })).success) return reply(429, "slow down");
   const client_id = crypto.randomUUID();
   const key = btoa(String.fromCharCode(...new Uint8Array(await clientKey(env, client_id))));
-  return Response.json({ client_id, key });
+  return Response.json({ client_id, key }, { headers: { "Cache-Control": "no-store" } });
 }
 
 // Stops at the cap: anyone can send a body, so never buffer more than we accept.
@@ -74,7 +83,9 @@ async function upload(req: Request, env: Env, id: string, batch: string): Promis
 }
 
 async function handle(req: Request, env: Env): Promise<Response> {
-  const { pathname } = new URL(req.url);
+  const { protocol, hostname, pathname } = new URL(req.url);
+  // Refused, not redirected: a client on http:// must be fixed, or it keeps sending in the clear.
+  if (protocol === "http:" && !LOCAL_HOSTS.includes(hostname)) return reply(403, "use https");
   if (req.method === "OPTIONS") return reply(204);
   if (req.method === "POST" && pathname === "/v1/register") return register(req, env);
   const log = req.method === "PUT" && LOG_PATH.exec(pathname);
@@ -92,6 +103,7 @@ export default {
       res = reply(500, "error");
     }
     for (const [name, value] of Object.entries(CORS)) res.headers.set(name, value);
+    res.headers.set("Strict-Transport-Security", "max-age=31536000");
     return res;
   },
 };

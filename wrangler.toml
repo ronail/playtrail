@@ -1,6 +1,8 @@
 name = "playtrail"
 main = "src/index.ts"
 compatibility_date = "2026-11-01"
+# Old versions must not stay reachable on their own URLs after a fix.
+preview_urls = false
 
 [[r2_buckets]]
 binding = "BUCKET"

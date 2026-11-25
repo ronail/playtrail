@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync, execFileSync } from "node:child_process";
 import { createHmac, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
+import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -95,6 +96,35 @@ after(() => {
   if (state) rmSync(state, { recursive: true, force: true });
 });
 
+// The response carries the key, so nothing may keep a copy.
+test("register response is not cacheable", async () => {
+  const res = await retry(() => postRegister());
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("cache-control"), "no-store");
+});
+
+// fetch cannot set Host, which is how the local server is told it is not on localhost.
+const plainHttp = (method, path) =>
+  new Promise((resolve, reject) => {
+    const url = remote ? new URL(path, base.replace(/^https:/, "http:")) : new URL(path, base);
+    request(url, { method, headers: remote ? {} : { host: "example.com" } }, (res) => {
+      res.resume();
+      resolve(res);
+    })
+      .on("error", reject)
+      .end();
+  });
+
+test("plain HTTP is refused", async () => {
+  for (const [method, path] of [["POST", "/v1/register"], ["PUT", "/v1/logs/a/b"], ["OPTIONS", "/v1/register"]]) {
+    const res = await plainHttp(method, path);
+    // A zone set to always use HTTPS redirects at the edge, before the Worker.
+    if (remote && [301, 308].includes(res.statusCode)) continue;
+    assert.equal(res.statusCode, 403, `${method} ${path}`);
+    assert.equal(res.headers["access-control-allow-origin"], "*");
+  }
+});
+
 test("register returns id and key", () => {
   assert.match(a.client_id, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
   assert.equal(Buffer.from(a.key, "base64").length, 32);
@@ -164,6 +194,7 @@ test("cors", async () => {
   const preflight = await fetch(`${base}/v1/logs/a/b`, { method: "OPTIONS" });
   assert.equal(preflight.status, 204);
   assertCors(preflight);
+  assert.equal(preflight.headers.get("strict-transport-security"), "max-age=31536000");
   const denied = await put(a, "x\n", { signature: null });
   assert.equal(denied.status, 401);
   assertCors(denied);
@@ -197,4 +228,15 @@ test("register is rate limited", { skip: !!remote }, async () => {
 test("upload is rate limited", { skip: !!remote }, async () => {
   const client = await register();
   await assertLimit(limits.upload, 201, () => put(client, "x\n", { wait: false }));
+});
+
+// One host usually holds a whole IPv6 /64, so the /64 shares one allowance.
+test("register limit covers a whole IPv6 /64", { skip: !!remote }, async () => {
+  // Different spellings and hosts, all inside 2001:db8:0:1::/64.
+  const same = ["2001:db8:0:1::1", "2001:db8:0:1::2", "2001:db8::1:0:0:0:3", "2001:db8:0:1:ffff:ffff:ffff:ffff"];
+  let limited = false;
+  for (let i = 0; i <= 2 * limits.register && !limited; i++)
+    limited = (await postRegister(same[i % same.length])).status === 429;
+  assert.ok(limited, "no 429 within one /64");
+  assert.equal((await postRegister("2001:db8:0:2::1")).status, 200, "neighbouring /64");
 });

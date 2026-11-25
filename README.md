@@ -42,7 +42,8 @@ X-Signature: base64(HMAC-SHA256(key, client_id + "\n" + batch_id + "\n" + body))
 ```
 
 `register` returns `key` as base64. **Decode it first:** the HMAC key is the
-decoded bytes, not the base64 text. IDs are 1 to 64 characters from `A-Z`, `a-z`,
+decoded bytes, not the base64 text. Use `https://`: plain HTTP gets 403, except
+on localhost. IDs are 1 to 64 characters from `A-Z`, `a-z`,
 `0-9`, `_` and `-`; a ULID or UUID works as a `batch_id`.
 
 ### Client example
@@ -97,13 +98,14 @@ npm run deploy
 openssl rand -base64 32 | npx wrangler secret put MASTER_KEY
 ```
 
-Requests fail with 500 until `MASTER_KEY` is set. Then set a billing
+Requests fail with 500 until `MASTER_KEY` is set. Keep it random, as generated
+above: anyone who registers can brute-force a guessable one. Then set a billing
 notification in the Cloudflare dashboard, keep the bucket private, and give
 readers a read-only R2 token.
 
 ### Rate limits
 
-Defaults are 5 registrations per IP and 10 uploads per client, each per 60
+Defaults are 5 registrations per IPv4 address or IPv6 /64 and 10 uploads per client, each per 60
 seconds. To change either, set `REGISTER_LIMIT` or `UPLOAD_LIMIT` (a positive
 whole number) in the shell that deploys:
 
@@ -127,6 +129,10 @@ npm run check    # type check
 BASE_URL=https://your-worker.workers.dev npm test   # against a deployment
 ```
 
+Plain HTTP is accepted only for `localhost`, `127.0.0.1` and `[::1]`. From an
+Android emulator or device, run `adb reverse tcp:8787 tcp:8787` and use
+`http://localhost:8787`, not `10.0.2.2` or a LAN address.
+
 A run against a deployment waits and retries when it hits a rate limit, so it can
 take a few minutes with low limits or right after another run.
 
@@ -145,7 +151,7 @@ It needs the one-time setup under [Deploy](#deploy) (bucket, lifecycle rule,
 | `CLOUDFLARE_API_TOKEN` | secret | A custom API token for your account with **Workers Scripts: Edit**, **Workers R2 Storage: Read** and **Account Settings: Read** |
 | `CLOUDFLARE_ACCOUNT_ID` | variable | Your account ID (`npx wrangler whoami`) |
 | `BASE_URL` | variable | Your deployment with no trailing slash, such as `https://playtrail.example.workers.dev` |
-| `REGISTER_LIMIT` | variable, optional | Registrations per IP per 60 s (default 5) |
+| `REGISTER_LIMIT` | variable, optional | Registrations per IPv4 address or IPv6 /64 per 60 s (default 5) |
 | `UPLOAD_LIMIT` | variable, optional | Uploads per client per 60 s (default 10) |
 
 ```sh
