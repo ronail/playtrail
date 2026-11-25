@@ -121,19 +121,22 @@ and runs the tests against the deployment. A failed test does not roll the
 deployment back.
 
 It needs the one-time setup under [Deploy](#deploy) (bucket, lifecycle rule,
-`MASTER_KEY`) and three repository secrets:
+`MASTER_KEY`) and these repository settings. Nothing about your account is committed.
 
-| Secret | Value |
-|---|---|
-| `CLOUDFLARE_API_TOKEN` | A custom API token for your account with **Workers Scripts: Edit**, **Workers R2 Storage: Read** and **Account Settings: Read** |
-| `CLOUDFLARE_ACCOUNT_ID` | Your account ID (`npx wrangler whoami`) |
-| `BASE_URL` | Your deployment with no trailing slash, such as `https://playtrail.example.workers.dev` |
+| Name | Kind | Value |
+|---|---|---|
+| `CLOUDFLARE_API_TOKEN` | secret | A custom API token for your account with **Workers Scripts: Edit**, **Workers R2 Storage: Read** and **Account Settings: Read** |
+| `CLOUDFLARE_ACCOUNT_ID` | variable | Your account ID (`npx wrangler whoami`) |
+| `BASE_URL` | variable | Your deployment with no trailing slash, such as `https://playtrail.example.workers.dev` |
 
 ```sh
 gh secret set CLOUDFLARE_API_TOKEN   # paste at the prompt
-gh secret set CLOUDFLARE_ACCOUNT_ID
-gh secret set BASE_URL
+gh variable set CLOUDFLARE_ACCOUNT_ID
+gh variable set BASE_URL
 ```
+
+Variables are not masked, so the account ID and URL can appear in this public
+repo's run logs. Use secrets instead if that matters.
 
 Each run against the deployment leaves a few test objects, which expire with the
 rest.
