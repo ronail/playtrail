@@ -1,24 +1,59 @@
 # Playtrail: Technical Requirements and Design
 
-Status: draft. Code below is a sketch that has not been run.
+Status: draft. Code and config below are sketches that have not been run.
 
 ## Architecture
 
-One Cloudflare Worker (TypeScript, no dependencies) and one R2 bucket. No
-database. A cron trigger on the same Worker handles retention.
+One Cloudflare Worker (TypeScript, no dependencies in v1) and one R2 bucket. No
+database and no scheduled jobs. An R2 lifecycle rule handles retention.
 
 ```
 game client ──PUT──▶ Worker ──put-if-absent──▶ R2 {client_id}/{batch_id}.ndjson
-                      ▲                          │
-                 daily cron ──delete idle────────┘
+                                                 │ lifecycle rule: expire at 14 days
 developer ──────────── S3-compatible read ───────▶ R2
 ```
 
+## Setup
+
+```toml
+# wrangler.toml
+name = "playtrail"
+main = "src/index.ts"
+compatibility_date = "2026-11-01"
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "playtrail-logs"
+
+[[ratelimits]]
+name = "REGISTER_LIMIT"
+namespace_id = "1001"
+simple = { limit = 5, period = 60 }
+
+[[ratelimits]]
+name = "UPLOAD_LIMIT"
+namespace_id = "1002"
+simple = { limit = 10, period = 60 }
+```
+
+```sh
+npx wrangler r2 bucket create playtrail-logs
+npx wrangler r2 bucket lifecycle add playtrail-logs --name expire-14d --expire-days 14
+openssl rand -base64 32 | npx wrangler secret put MASTER_KEY
+```
+
+Also set a billing notification in the Cloudflare dashboard, keep the bucket
+private, and give readers a read-only R2 token.
+
 ## API
+
+Both IDs must match `[\w-]{1,64}`, and the path regex is anchored:
+`^/v1/logs/([\w-]{1,64})/([\w-]{1,64})$`. This blocks path traversal.
 
 ### `POST /v1/register`
 
-Anonymous, rate limited per IP. Returns:
+Anonymous. Rate limited with `REGISTER_LIMIT`, keyed by `CF-Connecting-IP` (the
+IP is not stored). Returns:
 
 ```json
 {"client_id": "<server uuid>", "key": "<base64>"}
@@ -28,11 +63,11 @@ Anonymous, rate limited per IP. Returns:
 
 ### `PUT /v1/logs/{client_id}/{batch_id}`
 
-Headers: `Content-Type: application/x-ndjson`, `Content-Length`,
+Headers: `Content-Type: application/x-ndjson`,
 `X-Signature: base64(HMAC-SHA256(key, client_id + "\n" + batch_id + "\n" + body))`.
 
-Both IDs must match `[\w-]{1,64}`, which blocks path traversal. `batch_id` is a
-ULID, generated once when the batch is sealed and reused on every retry.
+`batch_id` is a ULID, generated once when the batch is sealed and reused on
+every retry.
 
 | Response | Meaning | Client action |
 |---|---|---|
@@ -40,16 +75,26 @@ ULID, generated once when the batch is sealed and reused on every retry.
 | 200 | already stored | drop the batch |
 | 401 | bad signature | register again, start a new `client_id` |
 | 404 | bad path | fix the client |
-| 413 | over 32 KB or no length | split the batch |
+| 413 | over 32 KB | split the batch |
 | 429 / 5xx / network | not stored or unknown | back off, retry with the same `batch_id` |
 
-PUT rather than POST: the client names the resource, so idempotency is permanent
-and needs no short-lived key store.
+PUT rather than POST: the client names the resource, so no short-lived
+idempotency key store is needed.
 
-### `OPTIONS`
+### CORS
 
-Web exports send a preflight. Answer it and set
-`Access-Control-Allow-Origin` to the game's origin, on error responses too.
+`X-Signature` and `application/x-ndjson` trigger a preflight. Answer `OPTIONS`
+with 204, and send these on **every** response, including errors:
+
+```
+Access-Control-Allow-Origin: *
+Access-Control-Allow-Methods: POST, PUT, OPTIONS
+Access-Control-Allow-Headers: Content-Type, X-Signature
+Access-Control-Max-Age: 86400
+```
+
+`*` is acceptable because there are no cookies or ambient credentials, and it
+works with game portals whose origins change.
 
 ## Event envelope (client convention)
 
@@ -63,7 +108,11 @@ parses the body.
 ## Upload sketch
 
 ```ts
-interface Env { BUCKET: R2Bucket; MASTER_KEY: string }
+interface Env {
+  BUCKET: R2Bucket;
+  MASTER_KEY: string;
+  UPLOAD_LIMIT: RateLimit;
+}
 const MAX = 32 * 1024;
 const enc = new TextEncoder();
 const hmacKey = (raw: BufferSource, use: KeyUsage) =>
@@ -72,9 +121,12 @@ const clientKey = async (env: Env, id: string) =>
   crypto.subtle.sign("HMAC", await hmacKey(enc.encode(env.MASTER_KEY), "sign"), enc.encode(id));
 
 // after matching the path to (id, batch):
-const len = Number(req.headers.get("content-length"));
-if (!(len > 0 && len <= MAX)) return new Response("bad size", { status: 413 });
+if (Number(req.headers.get("content-length") ?? 0) > MAX)
+  return new Response("too large", { status: 413 }); // early reject only
 const body = await req.arrayBuffer();
+if (body.byteLength === 0) return new Response("empty", { status: 400 });
+if (body.byteLength > MAX) return new Response("too large", { status: 413 }); // the real check
+
 const msg = new Uint8Array([...enc.encode(`${id}\n${batch}\n`), ...new Uint8Array(body)]);
 let ok = false;
 try {
@@ -83,11 +135,23 @@ try {
 } catch { /* bad base64 */ }
 if (!ok) return new Response("unauthorized", { status: 401 });
 
-const put = await env.BUCKET.put(`${id}/${batch}.ndjson`, body, {
-  onlyIf: { etagDoesNotMatch: "*" }, // put-if-absent
+// after the signature, so nobody else can use up this client's allowance
+if (!(await env.UPLOAD_LIMIT.limit({ key: id })).success)
+  return new Response("slow down", { status: 429 });
+
+const key = `${id}/${batch}.ndjson`;
+const put = await env.BUCKET.put(key, body, {
+  onlyIf: new Headers({ "If-None-Match": "*" }), // put-if-absent
 });
-return new Response(null, { status: put ? 201 : 200 });
+if (put) return new Response(null, { status: 201 });
+// Only report success if the object really exists, so a client never drops data.
+return new Response(null, { status: (await env.BUCKET.head(key)) ? 200 : 500 });
 ```
+
+**Put-if-absent must be tested against a real bucket** (`wrangler dev --remote`),
+not only locally: the wildcard behaviour on the Workers binding is not clearly
+documented. Test that a first upload stores and that a second one with a
+different body leaves the first unchanged.
 
 ## Client contract
 
@@ -99,70 +163,67 @@ return new Response(null, { status: put ? 201 : 200 });
 
 ## Retention
 
-R2 lifecycle rules expire objects by their own age, which would delete an active
-client's old data. A daily cron applies the idle rule instead:
+The lifecycle rule expires each object 14 days after it was uploaded.
 
-```ts
-// wrangler.toml: [triggers] crons = ["0 3 * * *"]
-async scheduled(_: ScheduledController, env: Env) {
-  const cutoff = Date.now() - 14 * 864e5;
-  const { delimitedPrefixes } = await env.BUCKET.list({ delimiter: "/" }); // first page only
-  for (const prefix of delimitedPrefixes) {
-    const keys: string[] = [];
-    let newest = 0, cursor: string | undefined;
-    do {
-      const page = await env.BUCKET.list({ prefix, cursor });
-      for (const o of page.objects) { keys.push(o.key); newest = Math.max(newest, o.uploaded.getTime()); }
-      cursor = page.truncated ? page.cursor : undefined;
-    } while (cursor);
-    if (newest < cutoff)
-      for (let i = 0; i < keys.length; i += 1000) await env.BUCKET.delete(keys.slice(i, i + 1000));
-  }
-}
+- Active players lose older batches too. This is intended: it needs no code, no
+  state and no paid plan.
+- Deletion is not instant at the 14-day mark; allow about a day (unverified).
+- A very late retry of an expired batch stores it again. Accepted.
+
+### Erasure on request
+
+The developer deletes the player's prefix with any S3-compatible tool, for
+example:
+
+```sh
+rclone delete r2:playtrail-logs/<client_id>/
 ```
 
-- Idle is measured by the server's `uploaded` time, not client timestamps.
-- **Required before release:** page through the client list with a cursor and
-  process a bounded number per run. The sketch reads only the first page, and the
-  Free plan limits subrequests per invocation (50).
-- An upload landing during the sweep can be deleted with the rest. Accepted.
-- A very late retry of a deleted batch stores it again. Accepted.
+This needs a write-capable token. Copies already exported must be deleted too.
 
 ## Security
 
 Treat the endpoint as anonymous write-only: anyone can register.
 
-| Threat | Mitigation |
-|---|---|
-| Secret extracted from the game | None ships. Keys are per install |
-| Writing under another client's ID | Server-issued IDs, signed requests |
-| Tampering | Signature covers IDs and body |
-| Replay | Same `batch_id`, so nothing is written |
-| Storage and cost abuse | 32 KB cap, per-IP rate limit, billing alert, 14-day expiry |
-| Sweep overwhelmed by spam IDs | Cursor-based sweep, alert if it doesn't finish |
-| Hostile content | Readers parse defensively and escape on display or export |
-| Personal data in logs | Don't log headers or store IPs in metadata |
-| Bucket exposure | No public access; read-only token for consumers |
+| Threat | Mitigation | What remains |
+|---|---|---|
+| Secret extracted from the game | None ships; keys are per install | One install's key can be extracted |
+| Writing under another client's ID | Server-issued IDs, signed requests | Nothing known |
+| Tampering | Signature covers IDs and body | Nothing known |
+| Replay | Same `batch_id`, so nothing is written | An expired batch can be replayed once more |
+| Storage abuse | 32 KB cap, upload limit, 14-day expiry | One ID can still hold about 6 GB; many IDs, more |
+| Request flooding | Rate limits | Rejected requests still count toward the daily quota |
+| Hostile content | Readers parse defensively, escape on display and export | Relies on readers |
+| Personal data in logs | Don't enable request logging or store IPs | Players may be identifiable from content |
+
+The rate limit binding is approximate and counted per Cloudflare location, so it
+is not an exact cap. The Workers Free daily request quota is shared by **every
+Worker in the account**: a flood can take your other Workers down until it
+resets. Use a separate account if that matters.
 
 Rotating `MASTER_KEY` invalidates every client, which then registers again.
 
 ## Attestation (phase 2, optional)
 
-Verify a platform token once, at `/register`.
+Verify a platform token once, at `/register`. This phase needs extra libraries
+or secrets.
 
 | Platform | Mechanism | Notes |
 |---|---|---|
-| Android | Play Integrity standard request | `requestHash` gives replay protection. Default quota 10k/day |
+| Android | Play Integrity standard request | `requestHash` binds the token to the request; Google handles replay protection. Decoding needs a Google service-account secret and an OAuth call. Default quota believed 10k/day (unverified) |
 | iOS | App Attest | Needs a server challenge (`GET /v1/challenge`, stateless HMAC nonce, 5 minutes) |
-| Web | Cloudflare Turnstile | Single-use token, valid 300 s |
+| Web | Cloudflare Turnstile | Token valid 300 s. Reuse detection is eventually consistent, so don't rely on strict single use |
 | Desktop | none | Rate limit only |
 
 **Weakest-path rule:** a bot claims whichever platform is weakest, so a stronger
 check on one platform adds little until the others match it.
 
-App Attest verification must validate the certificate chain to Apple's root,
-the nonce, the key ID and the app ID hash. It may exceed the Free plan's 10 ms
-CPU limit.
+**App Attest.** Verify the certificate chain to Apple's root, the nonce, the key
+ID, the app ID hash, the `aaguid` (production, not development) and that the
+counter is 0. The nonce is stateless, so one attestation can be resent within
+5 minutes: derive `client_id = hex(HMAC(MASTER_KEY, "attest:" + keyId))` so a
+resend returns the same ID instead of a new one. Parsing CBOR and X.509 needs
+libraries and may exceed the Free plan's 10 ms CPU limit.
 
 ## Cost
 
@@ -171,20 +232,29 @@ and [R2](https://developers.cloudflare.com/r2/pricing/) pricing.
 
 - Workers Free: 100k requests/day, 10 ms CPU.
 - R2 free monthly: 10 GB, 1M Class A (writes and lists), 10M Class B, free egress.
-- 1,000 batches a day is about 30k writes a month, so $0.
+- 1,000 batches a day is about 30k writes a month and at most about 450 MB
+  stored, so $0. Readers' list calls also count as Class A.
 
 ## Alternatives considered
 
 | Option | Why not |
 |---|---|
-| Hosted ingest or game analytics services | None found with both idempotent writes and idle deletion at $0 |
+| Hosted ingest or game analytics services | None found with both idempotent writes and automatic expiry at $0 |
 | AWS Lambda + S3 | Similar shape; reasonable if already on AWS |
 | Worker + D1 | A schema and database for data nobody queries |
 | Appending to one file | Object stores don't support it |
 | Shared bearer token | Public once shipped, and allows spoofing |
+| Delete a client's data after 14 days idle | Needs a sweep job that outgrows the Free plan and stored progress |
 
 ## To verify during implementation
 
-- Free-plan cron availability and whether R2 binding calls count as subrequests.
-- R2 `etagDoesNotMatch: "*"` behaviour, with a test.
-- Turnstile `siteverify` quota and App Attest quotas.
+- Put-if-absent on a real bucket (see above).
+- Lifecycle command syntax and how long after 14 days objects disappear.
+- Rate limit binding availability on the Free plan.
+- Turnstile `siteverify` and App Attest quotas.
+
+## References
+
+- [R2 object lifecycles](https://developers.cloudflare.com/r2/buckets/object-lifecycles)
+- [R2 Workers API](https://developers.cloudflare.com/r2/api/workers/workers-api-reference/)
+- [Rate limit binding](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/)
