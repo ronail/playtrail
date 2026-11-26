@@ -2,6 +2,7 @@
 
 Status: v1 implemented in [src/index.ts](../src/index.ts) and tested locally. The
 sketches below are illustrative; the source is authoritative.
+Security decisions are recorded in [adr/](adr/).
 
 ## Architecture
 
