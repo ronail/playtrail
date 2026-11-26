@@ -1,8 +1,7 @@
-import { fromBuild, hmacKey, newChallenge } from "./proof";
+import { fromBuild, fromPlay, hmacKey, newChallenge, type PlayEnv } from "./proof";
 
-interface Env {
+interface Env extends PlayEnv {
   BUCKET: R2Bucket;
-  MASTER_KEY: string;
   BUILD_KEYS?: string;
   REGISTER_LIMIT: RateLimit;
   UPLOAD_LIMIT: RateLimit;
@@ -33,15 +32,6 @@ function limitKey(ip: string): string {
   return groups.slice(0, 4).join(":");
 }
 
-async function register(req: Request, env: Env): Promise<Response> {
-  const ip = req.headers.get("CF-Connecting-IP") ?? "local";
-  if (!(await env.REGISTER_LIMIT.limit({ key: limitKey(ip) })).success) return reply(429, "slow down");
-  if (!(await fromBuild(req.headers, env))) return reply(401, "unauthorized");
-  const client_id = crypto.randomUUID();
-  const key = btoa(String.fromCharCode(...new Uint8Array(await clientKey(env, client_id))));
-  return Response.json({ client_id, key }, { headers: { "Cache-Control": "no-store" } });
-}
-
 // Stops at the cap: anyone can send a body, so never buffer more than we accept.
 async function readBody(req: Request): Promise<Uint8Array | null> {
   const buf = new Uint8Array(MAX);
@@ -52,6 +42,24 @@ async function readBody(req: Request): Promise<Uint8Array | null> {
     size += chunk.byteLength;
   }
   return buf.subarray(0, size);
+}
+
+async function register(req: Request, env: Env): Promise<Response> {
+  const ip = req.headers.get("CF-Connecting-IP") ?? "local";
+  if (!(await env.REGISTER_LIMIT.limit({ key: limitKey(ip) })).success) return reply(429, "slow down");
+
+  // One proof: a Play Integrity body, or the three build headers. Never both.
+  const body = await readBody(req);
+  if (!body) return reply(413, "too large");
+  const hasBuild = ["X-Build", "X-Timestamp", "X-Build-Signature"].some((name) => req.headers.has(name));
+  let status: number;
+  if (body.byteLength) status = hasBuild ? 401 : await fromPlay(body, env);
+  else status = (await fromBuild(req.headers, env)) ? 200 : 401;
+  if (status !== 200) return reply(status, status === 503 ? "try again" : "unauthorized");
+
+  const client_id = crypto.randomUUID();
+  const key = btoa(String.fromCharCode(...new Uint8Array(await clientKey(env, client_id))));
+  return Response.json({ client_id, key }, { headers: { "Cache-Control": "no-store" } });
 }
 
 async function upload(req: Request, env: Env, id: string, batch: string): Promise<Response> {

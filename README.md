@@ -136,6 +136,23 @@ nobody can register this way. A web build cannot keep a secret, so this only
 deters: the key can be extracted. The wire format is in the
 [TRD](docs/TRD.md#post-v1register).
 
+### Play Integrity (Android)
+
+The app must be in Play Console and linked to a Google Cloud project with the
+Play Integrity API enabled. Create a service account in that project, then set:
+
+```sh
+# Redirect the file: the prompt takes one line, and the key spans many.
+npx wrangler secret put GOOGLE_SA_KEY < /path/outside/the/repo/service-account.json
+npx wrangler secret put ANDROID_APPS    # {"com.example.game":["<certificate SHA-256 digest>"]}
+```
+
+Never commit the key. The digest is the one Play reports in
+`certificateSha256Digest` (base64url of the app signing certificate's SHA-256).
+Local and debug builds are not expected to pass: test through a Play internal
+test track. Without both secrets, Android cannot register. The request format is
+in the [TRD](docs/TRD.md#post-v1register).
+
 ### Rate limits
 
 Defaults are 5 registrations per IPv4 address or IPv6 /64 and 10 uploads per client, each per 60
