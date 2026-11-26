@@ -1,6 +1,6 @@
 # ADR-0001: HTTPS only, and a smaller deploy surface
 
-**Status:** Proposed. Implemented in [PR #4](https://github.com/ronail/playtrail/pull/4), not merged or deployed.
+**Status:** Accepted. Merged in [PR #4](https://github.com/ronail/playtrail/pull/4) and deployed 2026-11-26.
 **Date:** 2026-11-25 (written up 2026-11-26)
 
 ## Context
@@ -29,4 +29,5 @@ working while sending in the clear. A refusal makes the mistake visible.
 - Updating a CI action is now a manual change of commit hash.
 - A malicious npm dev dependency could still reach the deploy token, and `main`
   is only as safe as who can push to it.
-- To verify on a deployment: the 403, the headers and preview URLs being off.
+- Seen on the deployment 2026-11-26: the 403, HSTS and `no-store`. Preview URLs
+  being off is not verified.

@@ -70,7 +70,8 @@ Both IDs must match `[\w-]{1,64}`, and the path regex is anchored:
 
 ### `POST /v1/register`
 
-Anonymous. Rate limited with `REGISTER_LIMIT`, keyed by `CF-Connecting-IP`: the
+No accounts, but the request must prove it comes from one of our builds, else 401.
+Rate limited (before the proof is checked) with `REGISTER_LIMIT`, keyed by `CF-Connecting-IP`: the
 whole address for IPv4, the /64 prefix for IPv6 (the IP is not stored). The
 response carries the key, so it is sent with `Cache-Control: no-store`. Returns:
 
@@ -79,6 +80,51 @@ response carries the key, so it is sent with `Cache-Control: no-store`. Returns:
 ```
 
 `key = HMAC-SHA256(MASTER_KEY, client_id)`. It is derived, not stored.
+
+**Web proof: release key.**
+
+| Header | Value |
+|---|---|
+| `X-Build` | build ID, a key of the `BUILD_KEYS` secret |
+| `X-Timestamp` | Unix seconds, digits only, within 300 s of the server |
+| `X-Build-Signature` | base64 Ed25519 signature of `register\n{build}\n{timestamp}` |
+
+`BUILD_KEYS` is `{"<build>":"<base64 raw public key>"}`. Unset refuses this proof
+(401); malformed is a 500.
+
+**Android proof: Play Integrity.** No build headers; a JSON body instead:
+
+```json
+{"package_name": "com.example.game", "challenge": "<from /v1/challenge>", "integrity_token": "<Standard request token>"}
+```
+
+The app requests the token with `requestHash` = unpadded base64url
+`SHA256(challenge)`. The Worker gets an access token with `GOOGLE_SA_KEY`, calls
+`decodeIntegrityToken` and requires all of:
+
+- `package_name` listed in `ANDROID_APPS` and equal to `requestPackageName`
+- a valid challenge, and the matching `requestHash`
+- `requestDetails.timestampMillis` within 300 s
+- `appRecognitionVerdict` = `PLAY_RECOGNIZED` and an allowlisted certificate digest
+- `MEETS_DEVICE_INTEGRITY`
+
+Licensing is not required. The package and challenge are checked before Google is
+called, but anyone can fetch a challenge, so junk tokens still reach Google. Google clears the verdicts of a token decoded a second time, so no nonce
+is stored (not yet confirmed with a real token). `client_id` is random: verdicts
+carry no install ID. Default quotas are 10,000 token requests and 10,000 decodes
+per app per day. `GOOGLE_BASE` replaces both Google origins, for tests only.
+
+A request with both proofs, or part of one, gets 401. A body over 32 KB gets 413.
+If Google cannot be reached or answers with anything but success or 400, register
+returns 503: retry later.
+
+### `GET /v1/challenge`
+
+For native app proofs. Returns `{"challenge": "{ts}.{mac}"}` with
+`Cache-Control: no-store`, where `mac` is base64url
+`HMAC-SHA256(MASTER_KEY, "challenge\n{ts}")`. Valid for 300 s and not single use.
+Nothing is stored, it is not rate limited, and browsers are not expected to call
+it.
 
 ### `PUT /v1/logs/{client_id}/{batch_id}`
 
@@ -109,7 +155,7 @@ with 204, and send these on **every** response, including errors:
 ```
 Access-Control-Allow-Origin: *
 Access-Control-Allow-Methods: POST, PUT, OPTIONS
-Access-Control-Allow-Headers: Content-Type, X-Signature
+Access-Control-Allow-Headers: Content-Type, X-Signature, X-Build, X-Timestamp, X-Build-Signature
 Access-Control-Max-Age: 86400
 ```
 
@@ -203,11 +249,16 @@ This needs a write-capable token. Copies already exported must be deleted too.
 
 ## Security
 
-Treat the endpoint as anonymous write-only: anyone can register.
+Treat the endpoint as write-only and close to anonymous: a determined attacker
+can register.
 
 | Threat | Mitigation | What remains |
 |---|---|---|
-| Secret extracted from the game | None ships; keys are per install | One install's key can be extracted |
+| Secret extracted from the game | Upload keys are per install; a release key is replaced each release and can be removed | A web build's release key can be extracted and used to register until removed |
+| Replayed build proof | 300 s window either side | A captured request replays for 300 s, up to 600 s if stamped ahead |
+| One genuine Android device registering repeatedly | Register limit only | The limit is weak, and there is no per-device cap |
+| Junk Play Integrity tokens using up the decode quota | Register limit only (weak). The package and challenge checks stop only unlisted packages and bad challenges | If failed decodes count against the quota (unknown), a few addresses could use up a day's quota and stop Android registration. A hard cap would be needed |
+| Leaked CI signing seed | Kept in a GitHub secret | Whoever has it can register until `ci` is removed from `BUILD_KEYS` |
 | Key read off the network | HTTPS only, HSTS, `no-store` | A first request sent over `http://` is already exposed before the 403: an upload body and signature. A client set to `http://` has no protection against an active attacker, who can forward its register request over HTTPS and read the key |
 | Weak `MASTER_KEY` | Setup generates 32 random bytes | Anyone registered can brute-force a weak one offline, then sign for any ID |
 | Writing under another client's ID | Server-issued IDs, signed requests | Nothing known |
@@ -234,10 +285,10 @@ or secrets.
 
 | Platform | Mechanism | Notes |
 |---|---|---|
-| Android | Play Integrity standard request | `requestHash` binds the token to the request; Google handles replay protection. Decoding needs a Google service-account secret and an OAuth call. Default quota believed 10k/day (unverified) |
+| Android | Play Integrity standard request | Built, see [register](#post-v1register) |
 | iOS | App Attest | Needs a server challenge (`GET /v1/challenge`, stateless HMAC nonce, 5 minutes) |
-| Web | Cloudflare Turnstile | Token valid 300 s. Reuse detection is eventually consistent, so don't rely on strict single use |
-| Desktop | none | Rate limit only |
+| Web | Release key (built, see [register](#post-v1register)) | A deterrent only. Turnstile was rejected: it checks for bots, not our build |
+| Desktop | none | Cannot register |
 
 **Weakest-path rule:** a bot claims whichever platform is weakest, so a stronger
 check on one platform adds little until the others match it.

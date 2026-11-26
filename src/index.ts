@@ -1,6 +1,8 @@
-interface Env {
+import { fromBuild, fromPlay, hmacKey, newChallenge, type PlayEnv } from "./proof";
+
+interface Env extends PlayEnv {
   BUCKET: R2Bucket;
-  MASTER_KEY: string;
+  BUILD_KEYS?: string;
   REGISTER_LIMIT: RateLimit;
   UPLOAD_LIMIT: RateLimit;
 }
@@ -10,16 +12,13 @@ const LOG_PATH = /^\/v1\/logs\/([\w-]{1,64})\/([\w-]{1,64})$/;
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, PUT, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, X-Signature",
+  "Access-Control-Allow-Headers": "Content-Type, X-Signature, X-Build, X-Timestamp, X-Build-Signature",
   "Access-Control-Max-Age": "86400",
 };
 const LOCAL_HOSTS = ["localhost", "127.0.0.1", "[::1]"]; // where plain HTTP is allowed
 const enc = new TextEncoder();
 
 const reply = (status: number, text?: string) => new Response(text ?? null, { status });
-
-const hmacKey = (raw: BufferSource, use: "sign" | "verify") =>
-  crypto.subtle.importKey("raw", raw, { name: "HMAC", hash: "SHA-256" }, false, [use]);
 
 // The client's key is derived from its ID, so nothing is stored.
 const clientKey = async (env: Env, id: string) =>
@@ -33,14 +32,6 @@ function limitKey(ip: string): string {
   return groups.slice(0, 4).join(":");
 }
 
-async function register(req: Request, env: Env): Promise<Response> {
-  const ip = req.headers.get("CF-Connecting-IP") ?? "local";
-  if (!(await env.REGISTER_LIMIT.limit({ key: limitKey(ip) })).success) return reply(429, "slow down");
-  const client_id = crypto.randomUUID();
-  const key = btoa(String.fromCharCode(...new Uint8Array(await clientKey(env, client_id))));
-  return Response.json({ client_id, key }, { headers: { "Cache-Control": "no-store" } });
-}
-
 // Stops at the cap: anyone can send a body, so never buffer more than we accept.
 async function readBody(req: Request): Promise<Uint8Array | null> {
   const buf = new Uint8Array(MAX);
@@ -51,6 +42,24 @@ async function readBody(req: Request): Promise<Uint8Array | null> {
     size += chunk.byteLength;
   }
   return buf.subarray(0, size);
+}
+
+async function register(req: Request, env: Env): Promise<Response> {
+  const ip = req.headers.get("CF-Connecting-IP") ?? "local";
+  if (!(await env.REGISTER_LIMIT.limit({ key: limitKey(ip) })).success) return reply(429, "slow down");
+
+  // One proof: a Play Integrity body, or the three build headers. Never both.
+  const body = await readBody(req);
+  if (!body) return reply(413, "too large");
+  const hasBuild = ["X-Build", "X-Timestamp", "X-Build-Signature"].some((name) => req.headers.has(name));
+  let status: number;
+  if (body.byteLength) status = hasBuild ? 401 : await fromPlay(body, env);
+  else status = (await fromBuild(req.headers, env)) ? 200 : 401;
+  if (status !== 200) return reply(status, status === 503 ? "try again" : "unauthorized");
+
+  const client_id = crypto.randomUUID();
+  const key = btoa(String.fromCharCode(...new Uint8Array(await clientKey(env, client_id))));
+  return Response.json({ client_id, key }, { headers: { "Cache-Control": "no-store" } });
 }
 
 async function upload(req: Request, env: Env, id: string, batch: string): Promise<Response> {
@@ -87,6 +96,8 @@ async function handle(req: Request, env: Env): Promise<Response> {
   // Refused, not redirected: a client on http:// must be fixed, or it keeps sending in the clear.
   if (protocol === "http:" && !LOCAL_HOSTS.includes(hostname)) return reply(403, "use https");
   if (req.method === "OPTIONS") return reply(204);
+  if (req.method === "GET" && pathname === "/v1/challenge")
+    return Response.json({ challenge: await newChallenge(env.MASTER_KEY) }, { headers: { "Cache-Control": "no-store" } });
   if (req.method === "POST" && pathname === "/v1/register") return register(req, env);
   const log = req.method === "PUT" && LOG_PATH.exec(pathname);
   if (log) return upload(req, env, log[1], log[2]);
