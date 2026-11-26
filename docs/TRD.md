@@ -2,6 +2,7 @@
 
 Status: v1 implemented in [src/index.ts](../src/index.ts) and tested locally. The
 sketches below are illustrative; the source is authoritative.
+Security decisions are recorded in [adr/](adr/).
 
 ## Architecture
 
@@ -154,7 +155,7 @@ with 204, and send these on **every** response, including errors:
 ```
 Access-Control-Allow-Origin: *
 Access-Control-Allow-Methods: POST, PUT, OPTIONS
-Access-Control-Allow-Headers: Content-Type, X-Signature
+Access-Control-Allow-Headers: Content-Type, X-Signature, X-Build, X-Timestamp, X-Build-Signature
 Access-Control-Max-Age: 86400
 ```
 
@@ -254,7 +255,7 @@ can register.
 | Threat | Mitigation | What remains |
 |---|---|---|
 | Secret extracted from the game | Upload keys are per install; a release key is replaced each release and can be removed | A web build's release key can be extracted and used to register until removed |
-| Replayed build proof | 300 s window | A captured request replays for 300 s |
+| Replayed build proof | 300 s window either side | A captured request replays for 300 s, up to 600 s if stamped ahead |
 | One genuine Android device registering repeatedly | Register limit only | The limit is weak, and there is no per-device cap |
 | Junk Play Integrity tokens using up the decode quota | Register limit only (weak). The package and challenge checks stop only unlisted packages and bad challenges | If failed decodes count against the quota (unknown), a few addresses could use up a day's quota and stop Android registration. A hard cap would be needed |
 | Leaked CI signing seed | Kept in a GitHub secret | Whoever has it can register until `ci` is removed from `BUILD_KEYS` |
@@ -287,7 +288,7 @@ or secrets.
 | Android | Play Integrity standard request | Built, see [register](#post-v1register) |
 | iOS | App Attest | Needs a server challenge (`GET /v1/challenge`, stateless HMAC nonce, 5 minutes) |
 | Web | Release key (built, see [register](#post-v1register)) | A deterrent only. Turnstile was rejected: it checks for bots, not our build |
-| Desktop | none | Rate limit only |
+| Desktop | none | Cannot register |
 
 **Weakest-path rule:** a bot claims whichever platform is weakest, so a stronger
 check on one platform adds little until the others match it.

@@ -1,6 +1,7 @@
 # Registration whitelist: design
 
-Status: **approved 2026-11-26.** Nothing here is built. Play Integrity was
+Status: **approved 2026-11-26.** Nothing was built then; for current status see
+the [ADRs](../../adr/). Play Integrity was
 checked against Google's docs on 2026-11-26. Apple and Godot behaviour has not
 been rechecked.
 
