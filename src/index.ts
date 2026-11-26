@@ -1,6 +1,9 @@
+import { fromBuild } from "./proof";
+
 interface Env {
   BUCKET: R2Bucket;
   MASTER_KEY: string;
+  BUILD_KEYS?: string;
   REGISTER_LIMIT: RateLimit;
   UPLOAD_LIMIT: RateLimit;
 }
@@ -10,7 +13,7 @@ const LOG_PATH = /^\/v1\/logs\/([\w-]{1,64})\/([\w-]{1,64})$/;
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, PUT, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, X-Signature",
+  "Access-Control-Allow-Headers": "Content-Type, X-Signature, X-Build, X-Timestamp, X-Build-Signature",
   "Access-Control-Max-Age": "86400",
 };
 const LOCAL_HOSTS = ["localhost", "127.0.0.1", "[::1]"]; // where plain HTTP is allowed
@@ -36,6 +39,7 @@ function limitKey(ip: string): string {
 async function register(req: Request, env: Env): Promise<Response> {
   const ip = req.headers.get("CF-Connecting-IP") ?? "local";
   if (!(await env.REGISTER_LIMIT.limit({ key: limitKey(ip) })).success) return reply(429, "slow down");
+  if (!(await fromBuild(req.headers, env))) return reply(401, "unauthorized");
   const client_id = crypto.randomUUID();
   const key = btoa(String.fromCharCode(...new Uint8Array(await clientKey(env, client_id))));
   return Response.json({ client_id, key }, { headers: { "Cache-Control": "no-store" } });

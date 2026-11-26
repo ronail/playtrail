@@ -2,7 +2,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync, execFileSync } from "node:child_process";
-import { createHmac, randomUUID } from "node:crypto";
+import { createHmac, createPrivateKey, createPublicKey, generateKeyPairSync, randomUUID, sign as edSign } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
@@ -15,7 +15,7 @@ const wrangler = "node_modules/.bin/wrangler";
 const CORS = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "POST, PUT, OPTIONS",
-  "access-control-allow-headers": "Content-Type, X-Signature",
+  "access-control-allow-headers": "Content-Type, X-Signature, X-Build, X-Timestamp, X-Build-Signature",
   "access-control-max-age": "86400",
 };
 // Fresh local state per run: rate limit counts and objects would otherwise carry over.
@@ -38,10 +38,29 @@ const retry = async (send) => {
   return res;
 };
 
+// Release key that proves a web build. Local runs make one; a deployment needs one it already lists.
+if (remote) assert.ok(process.env.BUILD_ID && process.env.BUILD_SEED, "BASE_URL tests need BUILD_ID and BUILD_SEED");
+const BUILD_ID = remote ? process.env.BUILD_ID : "test";
+const buildKey = remote
+  ? createPrivateKey({
+      key: Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), Buffer.from(process.env.BUILD_SEED, "base64")]),
+      format: "der",
+      type: "pkcs8",
+    })
+  : generateKeyPairSync("ed25519").privateKey;
+const buildPublic = Buffer.from(createPublicKey(buildKey).export({ format: "jwk" }).x, "base64url").toString("base64");
+
+const now = () => Math.floor(Date.now() / 1000);
+const buildHeaders = (ts = now(), build = BUILD_ID) => ({
+  "X-Build": build,
+  "X-Timestamp": String(ts),
+  "X-Build-Signature": edSign(null, Buffer.from(`register\n${build}\n${ts}`), buildKey).toString("base64"),
+});
+
 // The local server trusts CF-Connecting-IP, so each address gets its own register allowance.
 // A deployment sets the header itself.
-const postRegister = (ip = `203.0.113.${++ips}`) =>
-  fetch(`${base}/v1/register`, { method: "POST", headers: remote ? {} : { "CF-Connecting-IP": ip } });
+const postRegister = (ip = `203.0.113.${++ips}`, { headers = buildHeaders(), body } = {}) =>
+  fetch(`${base}/v1/register`, { method: "POST", headers: remote ? headers : { ...headers, "CF-Connecting-IP": ip }, body });
 
 const register = async () => {
   const res = await retry(() => postRegister());
@@ -75,7 +94,7 @@ const assertCors = (res) => {
 
 before(async () => {
   if (!remote) {
-    const args = ["scripts/wrangler.mjs", "dev", "--port", "8787", "--var", "MASTER_KEY:test-only-key", "--persist-to", state];
+    const args = ["scripts/wrangler.mjs", "dev", "--port", "8787", "--var", "MASTER_KEY:test-only-key", "--var", `BUILD_KEYS:${JSON.stringify({ test: buildPublic })}`, "--persist-to", state];
     server = spawn(process.execPath, args, {
       stdio: ["ignore", "ignore", "inherit"], // shows why it did not start
       detached: true,
@@ -129,6 +148,35 @@ test("register returns id and key", () => {
   assert.match(a.client_id, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
   assert.equal(Buffer.from(a.key, "base64").length, 32);
   assert.notEqual(a.client_id, b.client_id);
+});
+
+test("register without a proof is refused", async () => {
+  const res = await retry(() => postRegister(undefined, { headers: {} }));
+  assert.equal(res.status, 401);
+  assertCors(res);
+});
+
+// Local only: this many registrations would hit a deployment's limit.
+test("bad build proof is refused", { skip: !!remote }, async () => {
+  const good = buildHeaders();
+  const without = (name) => Object.fromEntries(Object.entries(good).filter(([key]) => key !== name));
+  const cases = {
+    "wrong signature": { ...good, "X-Build-Signature": Buffer.alloc(64).toString("base64") },
+    "non-base64 signature": { ...good, "X-Build-Signature": "!!not base64!!" },
+    "short signature": { ...good, "X-Build-Signature": Buffer.alloc(10).toString("base64") },
+    "old timestamp": buildHeaders(now() - 301),
+    // 302, so a second ticking over cannot bring it inside the window.
+    "future timestamp": buildHeaders(now() + 302),
+    "timestamp not a number": buildHeaders("abc"),
+    "unknown build": buildHeaders(now(), "nope"),
+    "__proto__": buildHeaders(now(), "__proto__"),
+    "constructor": buildHeaders(now(), "constructor"),
+    "no X-Build": without("X-Build"),
+    "no X-Timestamp": without("X-Timestamp"),
+    "no X-Build-Signature": without("X-Build-Signature"),
+  };
+  for (const [name, headers] of Object.entries(cases))
+    assert.equal((await postRegister(undefined, { headers })).status, 401, name);
 });
 
 test("first upload 201, retry 200, object unchanged", async () => {

@@ -69,7 +69,8 @@ Both IDs must match `[\w-]{1,64}`, and the path regex is anchored:
 
 ### `POST /v1/register`
 
-Anonymous. Rate limited with `REGISTER_LIMIT`, keyed by `CF-Connecting-IP`: the
+No accounts, but the request must prove it comes from one of our builds, else 401.
+Rate limited (before the proof is checked) with `REGISTER_LIMIT`, keyed by `CF-Connecting-IP`: the
 whole address for IPv4, the /64 prefix for IPv6 (the IP is not stored). The
 response carries the key, so it is sent with `Cache-Control: no-store`. Returns:
 
@@ -78,6 +79,17 @@ response carries the key, so it is sent with `Cache-Control: no-store`. Returns:
 ```
 
 `key = HMAC-SHA256(MASTER_KEY, client_id)`. It is derived, not stored.
+
+**Web proof: release key.**
+
+| Header | Value |
+|---|---|
+| `X-Build` | build ID, a key of the `BUILD_KEYS` secret |
+| `X-Timestamp` | Unix seconds, digits only, within 300 s of the server |
+| `X-Build-Signature` | base64 Ed25519 signature of `register\n{build}\n{timestamp}` |
+
+`BUILD_KEYS` is `{"<build>":"<base64 raw public key>"}`. Unset refuses this proof
+(401); malformed is a 500.
 
 ### `PUT /v1/logs/{client_id}/{batch_id}`
 
@@ -202,11 +214,14 @@ This needs a write-capable token. Copies already exported must be deleted too.
 
 ## Security
 
-Treat the endpoint as anonymous write-only: anyone can register.
+Treat the endpoint as write-only and close to anonymous: a determined attacker
+can register.
 
 | Threat | Mitigation | What remains |
 |---|---|---|
-| Secret extracted from the game | None ships; keys are per install | One install's key can be extracted |
+| Secret extracted from the game | Upload keys are per install; a release key is replaced each release and can be removed | A web build's release key can be extracted and used to register until removed |
+| Replayed build proof | 300 s window | A captured request replays for 300 s |
+| Leaked CI signing seed | Kept in a GitHub secret | Whoever has it can register until `ci` is removed from `BUILD_KEYS` |
 | Key read off the network | HTTPS only, HSTS, `no-store` | A first request sent over `http://` is already exposed before the 403: an upload body and signature. A client set to `http://` has no protection against an active attacker, who can forward its register request over HTTPS and read the key |
 | Weak `MASTER_KEY` | Setup generates 32 random bytes | Anyone registered can brute-force a weak one offline, then sign for any ID |
 | Writing under another client's ID | Server-issued IDs, signed requests | Nothing known |
@@ -235,7 +250,7 @@ or secrets.
 |---|---|---|
 | Android | Play Integrity standard request | `requestHash` binds the token to the request; Google handles replay protection. Decoding needs a Google service-account secret and an OAuth call. Default quota believed 10k/day (unverified) |
 | iOS | App Attest | Needs a server challenge (`GET /v1/challenge`, stateless HMAC nonce, 5 minutes) |
-| Web | Cloudflare Turnstile | Token valid 300 s. Reuse detection is eventually consistent, so don't rely on strict single use |
+| Web | Release key (built, see [register](#post-v1register)) | A deterrent only. Turnstile was rejected: it checks for bots, not our build |
 | Desktop | none | Rate limit only |
 
 **Weakest-path rule:** a bot claims whichever platform is weakest, so a stronger
