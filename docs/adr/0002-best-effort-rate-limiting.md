@@ -28,7 +28,8 @@ over 30 registrations all returned 200
 
 ## Consequences
 
-- A client holding a valid proof can register without a dependable limit.
+- A client holding a valid proof can register without a dependable limit. Since
+  2026-11-26 registration needs a proof, so this means holders of a listed key.
 - Unsigned uploads and rejected requests are not capped and use the daily quota,
   which every Worker in the account shares.
 - Junk Play Integrity tokens reach Google. If they count against the decode

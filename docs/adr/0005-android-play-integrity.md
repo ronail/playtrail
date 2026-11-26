@@ -1,6 +1,6 @@
 # ADR-0005: Android registers with Play Integrity Standard requests
 
-**Status:** Accepted. In [PR #6](https://github.com/ronail/playtrail/pull/6), not merged or deployed; tested only against a stand-in for Google.
+**Status:** Accepted. Deployed 2026-11-26 from [PR #6](https://github.com/ronail/playtrail/pull/6) but **not configured**: `ANDROID_APPS` and `GOOGLE_SA_KEY` are unset, so Android is refused. Tested only against a stand-in for Google.
 **Date:** 2026-11-26
 
 ## Context

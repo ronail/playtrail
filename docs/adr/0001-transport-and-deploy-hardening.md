@@ -29,5 +29,5 @@ working while sending in the clear. A refusal makes the mistake visible.
 - Updating a CI action is now a manual change of commit hash.
 - A malicious npm dev dependency could still reach the deploy token, and `main`
   is only as safe as who can push to it.
-- Seen on the deployment 2026-11-26: the 403, HSTS and `no-store`. Preview URLs
+- Seen on the deployment 2026-11-26 ([evidence](../evidence/2026-11-26-live-checks.md)): the 403, HSTS and `no-store`. Preview URLs
   being off is not verified.

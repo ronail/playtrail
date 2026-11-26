@@ -1,6 +1,7 @@
 # Playtrail: Technical Requirements and Design
 
-Status: v1 implemented in [src/index.ts](../src/index.ts) and tested locally. The
+Status: deployed. See [Verification](#verification) for what has been checked
+there. The code is in [src/](../src/index.ts); the
 sketches below are illustrative; the source is authoritative.
 Security decisions are recorded in [adr/](adr/).
 
@@ -346,17 +347,28 @@ deployed ([evidence](evidence/2026-11-25-security.md)):
   connection, 429 appeared. Source IP, location and the deployed limit
   (5) were stable. Do not count on it against a deliberate client.
 
+Checked on the deployment, 2026-11-26, after the security changes and
+registration proofs were deployed
+([evidence](evidence/2026-11-26-live-checks.md)):
+
+- Plain HTTP register returns 403; HSTS and `no-store` are sent.
+- Register without a proof returns 401. With the CI release key it works, and
+  uploads work with the key returned.
+- `GET /v1/challenge` returns 200.
+
 Still to verify:
 
 - An overridden rate limit on a deployment. Overrides are tested only locally and
   with `wrangler deploy --dry-run`. Cloudflare documents no minimum or maximum
   for `limit`.
-- On a deployment: plain HTTP returns 403, the IPv6 /64 register limit applies,
-  and preview URLs are off.
+- On a deployment: the IPv6 /64 register limit applies and preview URLs are off.
+- Android with a real token: it registers, and reuse is refused. Also CPU time
+  of the RS256 signature.
+- Signing from a Godot web export.
 - Expiry: object
   `ce3b948d-e5d8-4ca6-8386-c47f58712c1e/limit-check-008b08d0-5bcd-4488-88ed-32f583560528.ndjson`
   (uploaded 2026-11-25) should be gone by 2026-12-11.
-- Turnstile `siteverify` and App Attest quotas (phase 2).
+- App Attest quotas.
 
 ## References
 
