@@ -1,6 +1,6 @@
 # ADR-0003: Registration requires proof of one of our builds
 
-**Status:** Accepted. Web and Android are in [PR #5](https://github.com/ronail/playtrail/pull/5), not merged or deployed. iOS is not built.
+**Status:** Accepted. Web and Android are in [PR #6](https://github.com/ronail/playtrail/pull/6), not merged or deployed. iOS is not built.
 **Date:** 2026-11-26
 
 ## Context

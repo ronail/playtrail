@@ -1,6 +1,6 @@
 # ADR-0005: Android registers with Play Integrity Standard requests
 
-**Status:** Accepted. In [PR #5](https://github.com/ronail/playtrail/pull/5), not merged or deployed; tested only against a stand-in for Google.
+**Status:** Accepted. In [PR #6](https://github.com/ronail/playtrail/pull/6), not merged or deployed; tested only against a stand-in for Google.
 **Date:** 2026-11-26
 
 ## Context

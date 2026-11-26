@@ -1,6 +1,6 @@
 # ADR-0002: Best-effort rate limiting; no hard cap yet
 
-**Status:** Proposed. The IPv6 /64 key is in [PR #4](https://github.com/ronail/playtrail/pull/4), not merged or deployed. The hard cap is **undecided**.
+**Status:** Accepted for the binding. The IPv6 /64 key was merged in [PR #4](https://github.com/ronail/playtrail/pull/4) and deployed 2026-11-26, not verified there. The hard cap is **undecided**.
 **Date:** 2026-11-25 (written up 2026-11-26)
 
 ## Context

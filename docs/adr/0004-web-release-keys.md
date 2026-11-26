@@ -1,6 +1,6 @@
 # ADR-0004: Web builds sign registration with a per-release key
 
-**Status:** Accepted. Server side in [PR #5](https://github.com/ronail/playtrail/pull/5), not merged or deployed. Client signing and build hardening are not built.
+**Status:** Accepted. Server side in [PR #6](https://github.com/ronail/playtrail/pull/6), not merged or deployed. Client signing and build hardening are not built.
 **Date:** 2026-11-26
 
 ## Context
