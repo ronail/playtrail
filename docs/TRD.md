@@ -2,6 +2,7 @@
 
 Status: v1 implemented in [src/index.ts](../src/index.ts) and tested locally. The
 sketches below are illustrative; the source is authoritative.
+Security decisions are recorded in [adr/](adr/).
 
 ## Architecture
 
@@ -21,6 +22,8 @@ developer ──────────── S3-compatible read ────�
 name = "playtrail"
 main = "src/index.ts"
 compatibility_date = "2026-11-01"
+# Old versions must not stay reachable on their own URLs after a fix.
+preview_urls = false
 
 [[r2_buckets]]
 binding = "BUCKET"
@@ -57,13 +60,19 @@ private, and give readers a read-only R2 token.
 
 ## API
 
+HTTPS only. A plain HTTP request gets 403 (except on `localhost`, `127.0.0.1` and
+`[::1]`, for local development) and is not redirected, so a misconfigured client
+fails visibly instead of sending in the clear. Every response sends
+`Strict-Transport-Security: max-age=31536000`.
+
 Both IDs must match `[\w-]{1,64}`, and the path regex is anchored:
 `^/v1/logs/([\w-]{1,64})/([\w-]{1,64})$`. This blocks path traversal.
 
 ### `POST /v1/register`
 
-Anonymous. Rate limited with `REGISTER_LIMIT`, keyed by `CF-Connecting-IP` (the
-IP is not stored). Returns:
+Anonymous. Rate limited with `REGISTER_LIMIT`, keyed by `CF-Connecting-IP`: the
+whole address for IPv4, the /64 prefix for IPv6 (the IP is not stored). The
+response carries the key, so it is sent with `Cache-Control: no-store`. Returns:
 
 ```json
 {"client_id": "<server uuid>", "key": "<base64>"}
@@ -84,6 +93,7 @@ every retry.
 | 201 | stored | drop the batch |
 | 200 | already stored | drop the batch |
 | 401 | bad signature | register again, start a new `client_id` |
+| 403 | plain HTTP | use `https://` |
 | 404 | bad path | fix the client |
 | 413 | over 32 KB | split the batch |
 | 429 / 5xx / network | not stored or unknown | back off, retry with the same `batch_id` |
@@ -198,11 +208,15 @@ Treat the endpoint as anonymous write-only: anyone can register.
 | Threat | Mitigation | What remains |
 |---|---|---|
 | Secret extracted from the game | None ships; keys are per install | One install's key can be extracted |
+| Key read off the network | HTTPS only, HSTS, `no-store` | A first request sent over `http://` is already exposed before the 403: an upload body and signature. A client set to `http://` has no protection against an active attacker, who can forward its register request over HTTPS and read the key |
+| Weak `MASTER_KEY` | Setup generates 32 random bytes | Anyone registered can brute-force a weak one offline, then sign for any ID |
 | Writing under another client's ID | Server-issued IDs, signed requests | Nothing known |
 | Tampering | Signature covers IDs and body | Nothing known |
 | Replay | Same `batch_id`, so nothing is written | An expired batch can be replayed once more |
 | Storage abuse | 32 KB cap, upload limit, 14-day expiry | One ID can still hold about 6 GB; many IDs, more |
-| Request flooding | Rate limits | Rejected requests still count toward the daily quota |
+| Mass registration | Limit per IPv4 address or IPv6 /64, best effort | Weak: opening new connections got past it (see Verification). Any web page can make its visitors register (CORS `*`). A hard cap needs a WAF rule on a custom domain or a Durable Object |
+| Request flooding | Rate limits | Rejected requests still count toward the daily quota; unsigned uploads are not limited. Needs a WAF rule on a custom domain |
+| Compromised CI action or old version | Actions pinned to commits; preview URLs off | A malicious npm dev dependency could still reach the deploy token. `main` is only as safe as who can push to it |
 | Hostile content | Readers parse defensively, escape on display and export | Relies on readers |
 | Personal data in logs | Don't enable request logging or store IPs | Players may be identifiable from content |
 
@@ -265,17 +279,29 @@ Checked on a deployment, 2026-11-25:
   needed.
 - The lifecycle command works and the `expire-14d` rule is listed.
 - Both rate limit bindings deployed and returned 429 (register after 5, upload
-  after 11 in one run; the limits are approximate).
+  after 11 in one run; the limits are approximate, and see the later check below).
 - A 40,000-byte body returned 413, with and without `Content-Length`. A body that
   never ends timed out instead, so early rejection of it is confirmed only
   locally. Cause not investigated.
 - A browser page on another origin registered (200) and uploaded (201).
+
+Checked again on the deployment, 2026-11-25, before the security changes were
+deployed ([evidence](evidence/2026-11-25-security.md)):
+
+- A client-sent `CF-Connecting-IP` is rejected at the edge (403, error 1000), so
+  the register limit key cannot be spoofed.
+- **The register limit did not hold across new connections:** over 30
+  registrations, each on its own connection, all returned 200. On one reused
+  connection, 429 appeared. Source IP, location and the deployed limit
+  (5) were stable. Do not count on it against a deliberate client.
 
 Still to verify:
 
 - An overridden rate limit on a deployment. Overrides are tested only locally and
   with `wrangler deploy --dry-run`. Cloudflare documents no minimum or maximum
   for `limit`.
+- On a deployment: plain HTTP returns 403, the IPv6 /64 register limit applies,
+  and preview URLs are off.
 - Expiry: object
   `ce3b948d-e5d8-4ca6-8386-c47f58712c1e/limit-check-008b08d0-5bcd-4488-88ed-32f583560528.ndjson`
   (uploaded 2026-11-25) should be gone by 2026-12-11.
