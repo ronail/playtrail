@@ -1,6 +1,6 @@
 # ADR-0003: Registration requires proof of one of our builds
 
-**Status:** Accepted. Web and Android are in [PR #6](https://github.com/ronail/playtrail/pull/6), not merged or deployed. iOS is not built.
+**Status:** Accepted. Merged in [PR #6](https://github.com/ronail/playtrail/pull/6) and deployed 2026-11-26 ([evidence](../evidence/2026-11-26-live-checks.md)). Android is not configured; iOS is not built.
 **Date:** 2026-11-26
 
 ## Context
@@ -31,8 +31,9 @@ accounts and no bot checks are wanted. A web build cannot keep a secret. See the
 ## Consequences
 
 - The check is only as strong as the weakest path, which is web.
-- Clients must send proofs before this is deployed.
-- Once this is deployed, only web and Android can register. iOS (until App
-  Attest is built), desktop and any other client are refused.
+- It was deployed before any client existed, so none was cut off. Clients must
+  send a proof from their first release.
+- Only web and Android can ever register as built. iOS (until App Attest is
+  built), desktop and any other client are refused.
 - Clients registered without proof stay valid until `MASTER_KEY` is rotated, and
   rotation makes every client register again.
