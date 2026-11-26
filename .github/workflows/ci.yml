@@ -60,6 +60,9 @@ jobs:
           # Optional: unset means the limits in wrangler.toml.
           REGISTER_LIMIT: ${{ vars.REGISTER_LIMIT }}
           UPLOAD_LIMIT: ${{ vars.UPLOAD_LIMIT }}
+      # A new version takes a while to be served everywhere. Tests started at once hit the old one.
+      # ponytail: fixed wait. If this still flakes, have the Worker report its version and poll for it.
+      - run: sleep 30
       - run: npm test
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
