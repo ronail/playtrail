@@ -99,7 +99,7 @@ export async function fromPlay(body: Uint8Array, env: PlayEnv): Promise<200 | 40
   }
   const { package_name: pkg, challenge, integrity_token } = request ?? {};
   if (typeof pkg !== "string" || typeof challenge !== "string" || typeof integrity_token !== "string") return 401;
-  // Both before calling Google, so junk does not use up the decode quota.
+  // Both before calling Google. Anyone can fetch a challenge, so junk tokens can still reach it.
   if (!Object.hasOwn(apps, pkg) || !(await validChallenge(challenge, env.MASTER_KEY))) return 401;
 
   const assertion = await serviceJwt(JSON.parse(env.GOOGLE_SA_KEY)); // bad key: 500

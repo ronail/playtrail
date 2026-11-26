@@ -108,7 +108,7 @@ The app requests the token with `requestHash` = unpadded base64url
 - `MEETS_DEVICE_INTEGRITY`
 
 Licensing is not required. The package and challenge are checked before Google is
-called. Google clears the verdicts of a token decoded a second time, so no nonce
+called, but anyone can fetch a challenge, so junk tokens still reach Google. Google clears the verdicts of a token decoded a second time, so no nonce
 is stored (not yet confirmed with a real token). `client_id` is random: verdicts
 carry no install ID. Default quotas are 10,000 token requests and 10,000 decodes
 per app per day. `GOOGLE_BASE` replaces both Google origins, for tests only.
@@ -256,7 +256,7 @@ can register.
 | Secret extracted from the game | Upload keys are per install; a release key is replaced each release and can be removed | A web build's release key can be extracted and used to register until removed |
 | Replayed build proof | 300 s window | A captured request replays for 300 s |
 | One genuine Android device registering repeatedly | Register limit only | The limit is weak, and there is no per-device cap |
-| Junk Play Integrity tokens using up the decode quota | Package and challenge checked first | A challenge is free to fetch; whether failed decodes count against the quota is unknown |
+| Junk Play Integrity tokens using up the decode quota | Register limit only (weak). The package and challenge checks stop only unlisted packages and bad challenges | If failed decodes count against the quota (unknown), a few addresses could use up a day's quota and stop Android registration. A hard cap would be needed |
 | Leaked CI signing seed | Kept in a GitHub secret | Whoever has it can register until `ci` is removed from `BUILD_KEYS` |
 | Key read off the network | HTTPS only, HSTS, `no-store` | A first request sent over `http://` is already exposed before the 403: an upload body and signature. A client set to `http://` has no protection against an active attacker, who can forward its register request over HTTPS and read the key |
 | Weak `MASTER_KEY` | Setup generates 32 random bytes | Anyone registered can brute-force a weak one offline, then sign for any ID |
