@@ -179,6 +179,24 @@ test("bad build proof is refused", { skip: !!remote }, async () => {
     assert.equal((await postRegister(undefined, { headers })).status, 401, name);
 });
 
+const getChallenge = async () => {
+  const res = await fetch(`${base}/v1/challenge`);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("cache-control"), "no-store");
+  return (await res.json()).challenge;
+};
+
+test("challenge has the expected shape", async () => {
+  assert.match(await getChallenge(), /^\d+\.[\w-]{43}$/);
+});
+
+// Both are HMACs under MASTER_KEY: a challenge must never double as an upload key.
+test("a challenge is not a client key", async () => {
+  const [ts, mac] = (await getChallenge()).split(".");
+  const forged = { client_id: ts, key: Buffer.from(mac, "base64url").toString("base64") };
+  assert.equal((await put(forged, "x\n")).status, 401);
+});
+
 test("first upload 201, retry 200, object unchanged", async () => {
   const batch = randomUUID();
   const first = '{"seq":1}\n';

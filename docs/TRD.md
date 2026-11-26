@@ -91,6 +91,14 @@ response carries the key, so it is sent with `Cache-Control: no-store`. Returns:
 `BUILD_KEYS` is `{"<build>":"<base64 raw public key>"}`. Unset refuses this proof
 (401); malformed is a 500.
 
+### `GET /v1/challenge`
+
+For native app proofs. Returns `{"challenge": "{ts}.{mac}"}` with
+`Cache-Control: no-store`, where `mac` is base64url
+`HMAC-SHA256(MASTER_KEY, "challenge\n{ts}")`. Valid for 300 s and not single use.
+Nothing is stored, it is not rate limited, and browsers are not expected to call
+it.
+
 ### `PUT /v1/logs/{client_id}/{batch_id}`
 
 Headers: `Content-Type: application/x-ndjson`,

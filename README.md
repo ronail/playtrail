@@ -13,6 +13,7 @@ Cloudflare Workers + R2.
 ## How it works
 
 ```
+GET  /v1/challenge                     → { challenge }   (native apps)
 POST /v1/register + proof              → { client_id, key }
 PUT  /v1/logs/{client_id}/{batch_id}   → 201 stored | 200 already stored
 ```

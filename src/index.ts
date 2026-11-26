@@ -1,4 +1,4 @@
-import { fromBuild } from "./proof";
+import { fromBuild, hmacKey, newChallenge } from "./proof";
 
 interface Env {
   BUCKET: R2Bucket;
@@ -20,9 +20,6 @@ const LOCAL_HOSTS = ["localhost", "127.0.0.1", "[::1]"]; // where plain HTTP is 
 const enc = new TextEncoder();
 
 const reply = (status: number, text?: string) => new Response(text ?? null, { status });
-
-const hmacKey = (raw: BufferSource, use: "sign" | "verify") =>
-  crypto.subtle.importKey("raw", raw, { name: "HMAC", hash: "SHA-256" }, false, [use]);
 
 // The client's key is derived from its ID, so nothing is stored.
 const clientKey = async (env: Env, id: string) =>
@@ -91,6 +88,8 @@ async function handle(req: Request, env: Env): Promise<Response> {
   // Refused, not redirected: a client on http:// must be fixed, or it keeps sending in the clear.
   if (protocol === "http:" && !LOCAL_HOSTS.includes(hostname)) return reply(403, "use https");
   if (req.method === "OPTIONS") return reply(204);
+  if (req.method === "GET" && pathname === "/v1/challenge")
+    return Response.json({ challenge: await newChallenge(env.MASTER_KEY) }, { headers: { "Cache-Control": "no-store" } });
   if (req.method === "POST" && pathname === "/v1/register") return register(req, env);
   const log = req.method === "PUT" && LOG_PATH.exec(pathname);
   if (log) return upload(req, env, log[1], log[2]);

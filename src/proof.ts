@@ -1,8 +1,22 @@
 // Proof that a registration comes from one of our own builds.
+export const hmacKey = (raw: BufferSource, use: "sign" | "verify") =>
+  crypto.subtle.importKey("raw", raw, { name: "HMAC", hash: "SHA-256" }, false, [use]);
+
 const WINDOW = 300; // seconds
 const enc = new TextEncoder();
 const fromBase64 = (text: string) => Uint8Array.from(atob(text), (c) => c.charCodeAt(0));
 const fresh = (seconds: number) => Math.abs(Math.floor(Date.now() / 1000) - seconds) <= WINDOW;
+
+const toBase64Url = (bytes: ArrayBuffer) =>
+  btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+// Stateless: the challenge carries its own time and MAC. The newline cannot appear in a
+// client ID, so a challenge MAC is never anyone's upload key.
+export async function newChallenge(masterKey: string): Promise<string> {
+  const ts = Math.floor(Date.now() / 1000);
+  const key = await hmacKey(enc.encode(masterKey), "sign");
+  return `${ts}.${toBase64Url(await crypto.subtle.sign("HMAC", key, enc.encode(`challenge\n${ts}`)))}`;
+}
 
 // A web release signs with the key it ships with. Extractable, so a deterrent only.
 export async function fromBuild(headers: Headers, env: { BUILD_KEYS?: string }): Promise<boolean> {
