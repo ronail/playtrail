@@ -28,6 +28,7 @@ The Worker requires all of:
 - `iss` is `accounts.google.com` or `https://accounts.google.com`
 - `aud` equals `GOOGLE_CLIENT_ID`
 - `exp` has not passed
+- `iat` is within 300 s of the server's time, either side
 - `sub` is a non-empty string
 
 Anything else is 401. If Google's keys cannot be fetched, 503. Without
@@ -48,7 +49,7 @@ dependencies and no storage.
 - **Docs:** README, TRD, a new ADR-0006; ADR-0003 and 0004 marked superseded for
   web.
 - **Tests:** local tests sign tokens with their own key through the existing
-  `GOOGLE_BASE` stand-in: each check above, the same account gets the same ID,
+  `GOOGLE_BASE` stand-in: each check above (including a stale `iat`), the same account gets the same ID,
   different accounts differ. The deployment run checks only that a bad token
   gets 401. A real token is checked by hand once.
 
@@ -65,21 +66,63 @@ policy and for erasure: the game should be able to show the player their
 - One account holds one ID, but many accounts give many IDs.
 - The upload limit is the same rate limit binding, not verified on a deployment.
 - A player can use their own token or key in a script.
-- Someone who obtains a player's ID token within its lifetime (about an hour)
-  gets that player's upload key. A `nonce` check would narrow this; left out
-  because replay protection needs stored state.
+- Someone who obtains a player's ID token within 300 s of it being issued gets
+  that player's upload key. Google fixes the token's own lifetime (about an
+  hour); the Worker's age check is what shortens it. The key obtained stays
+  valid.
 - A key cannot be revoked for one player. Only rotating `MASTER_KEY` does it,
   for everyone, and rotation also changes every derived `client_id`.
+
+## Godot web export (checked 2026-11-27)
+
+A throwaway Godot 4.7 single-threaded export loaded Google's script through
+`JavaScriptBridge` and drew the sign-in button on `localhost`, with a
+placeholder client ID. The same build was served again with the isolation
+headers a threaded export needs
+(`Cross-Origin-Opener-Policy: same-origin`,
+`Cross-Origin-Embedder-Policy: require-corp`): script and button still loaded,
+but a page could no longer receive a message from a cross-origin popup (tested
+with a local popup in headless Chromium 153; without the headers the message
+arrived).
+
+**So: export single-threaded and do not send those headers.** Threaded export
+itself was not built (template not installed). Not tested: a real sign-in, and
+whether Google's FedCM button mode works on an isolated page.
+
+## Environment variables
+
+| Name | Where | Status |
+|---|---|---|
+| `GOOGLE_CLIENT_ID` | Worker secret | **new** |
+| `MASTER_KEY` | Worker secret | set |
+| `BUILD_KEYS` | Worker secret, only the `ci` entry needed | set |
+| `BUILD_SEED` | GitHub secret | set |
+| `CLOUDFLARE_API_TOKEN` | GitHub secret | set |
+| `CLOUDFLARE_ACCOUNT_ID`, `BASE_URL` | GitHub variables | set |
+| `REGISTER_LIMIT`, `UPLOAD_LIMIT` | GitHub variables, optional | unset |
+| `ANDROID_APPS`, `GOOGLE_SA_KEY` | Worker secrets, Android only | unset, deferred |
+
+The client ID is not confidential; it is a secret binding so that a deploy keeps
+it and the repository does not name the deployment.
+
+```bash
+npx wrangler secret put GOOGLE_CLIENT_ID
+```
+
+Local development, in `.dev.vars` (git ignored):
+
+```
+MASTER_KEY=local-only-key
+BUILD_KEYS={"dev":"<public key>"}
+GOOGLE_CLIENT_ID=<client ID>
+```
 
 ## Not in this repository
 
 - Google Cloud OAuth web client, consent screen, authorized JavaScript origins
-  (the game's HTTPS origin), privacy policy page.
-- `npx wrangler secret put GOOGLE_CLIENT_ID`
-- Godot client: sign-in button through `JavaScriptBridge`, loading Google's
-  script. **Unverified:** a threaded web export needs cross-origin isolation
-  headers, which are likely to break Google's script or popup. Try sign-in in a
-  throwaway export before building on it.
+  (the game's HTTPS origin, and `http://localhost` with its port for
+  development), privacy policy page.
+- Godot client: sign-in button through `JavaScriptBridge`.
 
 ## Success
 
