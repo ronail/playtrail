@@ -56,6 +56,8 @@ In a web game, sign the player in with
 register with the ID token it returns:
 
 ```js
+// Page needs <script src="https://accounts.google.com/gsi/client" async></script>
+const base = "https://<your-worker>";
 google.accounts.id.initialize({
   client_id: "<GOOGLE_CLIENT_ID>",
   callback: async ({ credential }) => {
