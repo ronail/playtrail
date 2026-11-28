@@ -41,14 +41,14 @@ long-term storage.
 
 | ID | Requirement |
 |---|---|
-| F1 | A new install of our own build can register and receive an ID and signing key |
+| F1 | A web player signed in with Google, or our Android app, can register and receive an ID and signing key |
 | F2 | A client can upload a batch of up to 32 KB of NDJSON |
 | F3 | Re-uploading a stored batch ID succeeds without writing again |
 | F4 | A client cannot write under another client's ID |
 | F5 | Every batch is deleted by a storage rule 14 days after upload |
 | F6 | Released web exports can register and upload (CORS) |
 | F7 | Registration and uploads are rate limited |
-| N1 | No long-lived secret is embedded in the distributed game. Exception: a web build carries a per-release signing key, which can be extracted |
+| N1 | No long-lived secret is embedded in the distributed game |
 | N2 | The game stays fully playable when Playtrail is unreachable |
 | N3 | Runs within Cloudflare free tiers at the assumed volume |
 
@@ -59,7 +59,8 @@ long-term storage.
 - **Identity:** use only the server-issued ID, never a device or hardware ID.
 - **Hidden information:** logs may contain secret moves. Never expose them to
   players while a match is live.
-- **Privacy notice:** state that each upload is kept for about 14 days.
+- **Privacy notice:** state that each upload is kept for about 14 days and,
+  for web players, is linked to an ID derived from their Google account.
 - **Erasure requests:** show players their `client_id` (for example in
   settings), so you can delete their data on request. See the TRD.
 - **Reading:** export data you want to keep within 14 days of upload.
@@ -70,7 +71,7 @@ long-term storage.
 - Against a real bucket, uploading one batch twice returns 201 then 200 and
   leaves one object.
 - A wrong signature, altered body or another client's ID returns 401.
-- Registering without a valid build proof returns 401.
+- Registering without a valid proof returns 401.
 - A body over 32 KB returns 413.
 - A browser export on another origin can register and upload.
 - The bucket has a 14-day expiry rule, and a test object is gone by day 16.

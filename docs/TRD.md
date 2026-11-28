@@ -71,18 +71,40 @@ Both IDs must match `[\w-]{1,64}`, and the path regex is anchored:
 
 ### `POST /v1/register`
 
-No accounts, but the request must prove it comes from one of our builds, else 401.
+The request must carry one proof, else 401: a Google ID token (web), a Play
+Integrity token (Android) or the CI build signature.
 Rate limited (before the proof is checked) with `REGISTER_LIMIT`, keyed by `CF-Connecting-IP`: the
 whole address for IPv4, the /64 prefix for IPv6 (the IP is not stored). The
 response carries the key, so it is sent with `Cache-Control: no-store`. Returns:
 
 ```json
-{"client_id": "<server uuid>", "key": "<base64>"}
+{"client_id": "<id>", "key": "<base64>"}
 ```
 
 `key = HMAC-SHA256(MASTER_KEY, client_id)`. It is derived, not stored.
 
-**Web proof: release key.**
+**Web proof: Google sign-in.** No build headers; the body is:
+
+```json
+{"google_id_token": "<ID token>"}
+```
+
+The Worker requires all of:
+
+- `alg` `RS256`, and a signature that verifies against the key `kid` names in
+  `https://www.googleapis.com/oauth2/v3/certs` (cached per `Cache-Control`)
+- `iss` `accounts.google.com` or `https://accounts.google.com`
+- `aud` equal to `GOOGLE_CLIENT_ID`
+- `exp` not passed, and `iat` within 300 s of the server, either side
+- a non-empty `sub`
+
+Else 401, also when `GOOGLE_CLIENT_ID` is unset; 503 if the keys cannot be
+fetched. `client_id` is unpadded base64url
+`HMAC-SHA256(MASTER_KEY, "google\n" + sub)`, so an account always gets the same
+one. No other claim is read, stored or logged. For other proofs `client_id` is a
+random UUID.
+
+**CI proof: build signature.**
 
 | Header | Value |
 |---|---|
@@ -115,9 +137,10 @@ is stored (not yet confirmed with a real token). `client_id` is random: verdicts
 carry no install ID. Default quotas are 10,000 token requests and 10,000 decodes
 per app per day. `GOOGLE_BASE` replaces both Google origins, for tests only.
 
-A request with both proofs, or part of one, gets 401. A body over 32 KB gets 413.
+A request with two proofs, or part of one, gets 401. A body over 32 KB gets 413.
 If Google cannot be reached or answers with anything but success or 400, register
-returns 503: retry later.
+returns 503: retry later. `GOOGLE_BASE` also replaces the origin of Google's
+sign-in keys.
 
 ### `GET /v1/challenge`
 
@@ -255,8 +278,9 @@ can register.
 
 | Threat | Mitigation | What remains |
 |---|---|---|
-| Secret extracted from the game | Upload keys are per install; a release key is replaced each release and can be removed | A web build's release key can be extracted and used to register until removed |
-| Replayed build proof | 300 s window either side | A captured request replays for 300 s, up to 600 s if stamped ahead |
+| Secret extracted from the game | Web builds ship none | A player can use their own token or key in a script |
+| Stolen Google ID token | Accepted only within 300 s of issue | Whoever uses it in time gets that player's upload key, which stays valid. Only rotating `MASTER_KEY` revokes it |
+| Replayed CI build proof | 300 s window either side | A captured request replays for 300 s, up to 600 s if stamped ahead |
 | One genuine Android device registering repeatedly | Register limit only | The limit is weak, and there is no per-device cap |
 | Junk Play Integrity tokens using up the decode quota | Register limit only (weak). The package and challenge checks stop only unlisted packages and bad challenges | If failed decodes count against the quota (unknown), a few addresses could use up a day's quota and stop Android registration. A hard cap would be needed |
 | Leaked CI signing seed | Kept in a GitHub secret | Whoever has it can register until `ci` is removed from `BUILD_KEYS` |
@@ -266,18 +290,19 @@ can register.
 | Tampering | Signature covers IDs and body | Nothing known |
 | Replay | Same `batch_id`, so nothing is written | An expired batch can be replayed once more |
 | Storage abuse | 32 KB cap, upload limit, 14-day expiry | One ID can still hold about 6 GB; many IDs, more |
-| Mass registration | Limit per IPv4 address or IPv6 /64, best effort | Weak: opening new connections got past it (see Verification). Any web page can make its visitors register (CORS `*`). A hard cap needs a WAF rule on a custom domain or a Durable Object |
+| Mass registration | One ID per Google account; limit per IPv4 address or IPv6 /64, best effort | Many accounts give many IDs. The limit is weak (see Verification). A hard cap needs a WAF rule on a custom domain or a Durable Object |
 | Request flooding | Rate limits | Rejected requests still count toward the daily quota; unsigned uploads are not limited. Needs a WAF rule on a custom domain |
 | Compromised CI action or old version | Actions pinned to commits; preview URLs off | A malicious npm dev dependency could still reach the deploy token. `main` is only as safe as who can push to it |
 | Hostile content | Readers parse defensively, escape on display and export | Relies on readers |
-| Personal data in logs | Don't enable request logging or store IPs | Players may be identifiable from content |
+| Personal data in logs | Don't enable request logging or store IPs | Players may be identifiable from content. A web player's logs are also linked to a pseudonymous ID for their Google account |
 
 The rate limit binding is approximate and counted per Cloudflare location, so it
 is not an exact cap. The Workers Free daily request quota is shared by **every
 Worker in the account**: a flood can take your other Workers down until it
 resets. Use a separate account if that matters.
 
-Rotating `MASTER_KEY` invalidates every client, which then registers again.
+Rotating `MASTER_KEY` invalidates every client, which then registers again. It
+also changes every Google-derived `client_id`.
 
 ## Attestation (phase 2, optional)
 
@@ -288,7 +313,7 @@ or secrets.
 |---|---|---|
 | Android | Play Integrity standard request | Built, see [register](#post-v1register) |
 | iOS | App Attest | Needs a server challenge (`GET /v1/challenge`, stateless HMAC nonce, 5 minutes) |
-| Web | Release key (built, see [register](#post-v1register)) | A deterrent only. Turnstile was rejected: it checks for bots, not our build |
+| Web | Google sign-in (built, see [register](#post-v1register)) | Proves an account, not our build |
 | Desktop | none | Cannot register |
 
 **Weakest-path rule:** a bot claims whichever platform is weakest, so a stronger
@@ -364,7 +389,9 @@ Still to verify:
 - On a deployment: the IPv6 /64 register limit applies and preview URLs are off.
 - Android with a real token: it registers, and reuse is refused. Also CPU time
   of the RS256 signature.
-- Signing from a Godot web export.
+- Google sign-in with a real token, on a deployment and from a Godot web export.
+  A throwaway Godot 4.7 export only loaded Google's script and drew the button.
+  Also whether Google ever returns a token issued more than 300 s earlier.
 - Expiry: object
   `ce3b948d-e5d8-4ca6-8386-c47f58712c1e/limit-check-008b08d0-5bcd-4488-88ed-32f583560528.ndjson`
   (uploaded 2026-11-25) should be gone by 2026-12-11.

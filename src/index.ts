@@ -1,6 +1,6 @@
-import { fromBuild, fromPlay, hmacKey, newChallenge, type PlayEnv } from "./proof";
+import { fromBuild, fromGoogle, fromPlay, hmacKey, newChallenge, toBase64Url, type GoogleEnv, type PlayEnv } from "./proof";
 
-interface Env extends PlayEnv {
+interface Env extends PlayEnv, GoogleEnv {
   BUCKET: R2Bucket;
   BUILD_KEYS?: string;
   REGISTER_LIMIT: RateLimit;
@@ -20,9 +20,10 @@ const enc = new TextEncoder();
 
 const reply = (status: number, text?: string) => new Response(text ?? null, { status });
 
+const masterMac = async (env: Env, text: string) =>
+  crypto.subtle.sign("HMAC", await hmacKey(enc.encode(env.MASTER_KEY), "sign"), enc.encode(text));
 // The client's key is derived from its ID, so nothing is stored.
-const clientKey = async (env: Env, id: string) =>
-  crypto.subtle.sign("HMAC", await hmacKey(enc.encode(env.MASTER_KEY), "sign"), enc.encode(id));
+const clientKey = masterMac;
 
 // One host usually holds a whole IPv6 /64, so limit by that, not by address.
 function limitKey(ip: string): string {
@@ -44,20 +45,39 @@ async function readBody(req: Request): Promise<Uint8Array | null> {
   return buf.subarray(0, size);
 }
 
+// The parsed body, if it is a Google sign-in request.
+function googleRequest(body: Uint8Array): { google_id_token: unknown } | null {
+  try {
+    const value = JSON.parse(new TextDecoder().decode(body));
+    return value && Object.hasOwn(value, "google_id_token") ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 async function register(req: Request, env: Env): Promise<Response> {
   const ip = req.headers.get("CF-Connecting-IP") ?? "local";
   if (!(await env.REGISTER_LIMIT.limit({ key: limitKey(ip) })).success) return reply(429, "slow down");
 
-  // One proof: a Play Integrity body, or the three build headers. Never both.
+  // One proof: a Google or Play Integrity body, or the three build headers. Never two.
   const body = await readBody(req);
   if (!body) return reply(413, "too large");
   const hasBuild = ["X-Build", "X-Timestamp", "X-Build-Signature"].some((name) => req.headers.has(name));
-  let status: number;
-  if (body.byteLength) status = hasBuild ? 401 : await fromPlay(body, env);
-  else status = (await fromBuild(req.headers, env)) ? 200 : 401;
-  if (status !== 200) return reply(status, status === 503 ? "try again" : "unauthorized");
-
-  const client_id = crypto.randomUUID();
+  const refuse = (status: number) => reply(status, status === 503 ? "try again" : "unauthorized");
+  let client_id: string = crypto.randomUUID();
+  const google = body.byteLength ? googleRequest(body) : null;
+  if (google) {
+    if (hasBuild || ["package_name", "challenge", "integrity_token"].some((field) => field in google)) return refuse(401);
+    const account = await fromGoogle(google.google_id_token, env);
+    if (typeof account === "number") return refuse(account);
+    // Same account, same ID. The newline cannot appear in a client ID, so this is nobody's upload key.
+    client_id = toBase64Url(await masterMac(env, `google\n${account.sub}`));
+  } else {
+    let status: number;
+    if (body.byteLength) status = hasBuild ? 401 : await fromPlay(body, env);
+    else status = (await fromBuild(req.headers, env)) ? 200 : 401;
+    if (status !== 200) return refuse(status);
+  }
   const key = btoa(String.fromCharCode(...new Uint8Array(await clientKey(env, client_id))));
   return Response.json({ client_id, key }, { headers: { "Cache-Control": "no-store" } });
 }

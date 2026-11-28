@@ -65,7 +65,9 @@ const saKey = google && JSON.stringify({
   client_email: "test@example.iam.gserviceaccount.com",
   private_key: google.privateKey.export({ type: "pkcs8", format: "pem" }),
 });
-const stub = { tokenStatus: 200, decodes: 0 };
+const stub = { tokenStatus: 200, decodes: 0, certsStatus: 200, certsCache: "no-store", certsAge: "0", certsBody: null, certsFetches: 0 };
+const CLIENT_ID = "test-client.apps.googleusercontent.com";
+const KID = "test-kid";
 const validJwt = (jwt = "") => {
   const [header, claims, signature] = jwt.split(".");
   if (!signature || !verify("sha256", Buffer.from(`${header}.${claims}`), google.publicKey, Buffer.from(signature, "base64url"))) return false;
@@ -77,6 +79,12 @@ const googleStub = createServer(async (req, res) => {
   let text = "";
   for await (const chunk of req) text += chunk;
   const answer = (status, body = {}) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
+  if (req.url === "/oauth2/v3/certs") {
+    stub.certsFetches++;
+    res.setHeader("cache-control", stub.certsCache);
+    res.setHeader("age", stub.certsAge);
+    return answer(stub.certsStatus, stub.certsBody ?? { keys: [{ ...google.publicKey.export({ format: "jwk" }), kid: KID, alg: "RS256", use: "sig" }] });
+  }
   if (req.url === "/token") {
     const form = new URLSearchParams(text);
     const ok = form.get("grant_type") === "urn:ietf:params:oauth:grant-type:jwt-bearer" && validJwt(form.get("assertion") ?? "");
@@ -128,7 +136,7 @@ before(async () => {
     await new Promise((resolve) => googleStub.listen(0, "127.0.0.1", resolve)); // any free port
     const args = ["scripts/wrangler.mjs", "dev", "--port", "8787", "--var", "MASTER_KEY:test-only-key", "--var", `BUILD_KEYS:${JSON.stringify({ test: buildPublic })}`, "--persist-to", state,
       "--var", `ANDROID_APPS:${JSON.stringify({ [PACKAGE]: [CERT] })}`, "--var", `GOOGLE_SA_KEY:${saKey}`,
-      "--var", `GOOGLE_BASE:http://127.0.0.1:${googleStub.address().port}`];
+      "--var", `GOOGLE_BASE:http://127.0.0.1:${googleStub.address().port}`, "--var", `GOOGLE_CLIENT_ID:${CLIENT_ID}`];
     server = spawn(process.execPath, args, {
       stdio: ["ignore", "ignore", "inherit"], // shows why it did not start
       detached: true,
@@ -307,6 +315,115 @@ test("google failure is retryable", { skip: !!remote }, async () => {
     assert.equal((await postPlay(await playBody())).status, 503, "token 500");
   } finally {
     stub.tokenStatus = 200;
+  }
+});
+
+// A Google ID token, signed with the stub's key unless a test says otherwise.
+const part = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
+const idToken = ({ claims = {}, header = {}, signer = (data) => edSign("sha256", data, google.privateKey) } = {}) => {
+  const unsigned = `${part({ alg: "RS256", kid: KID, typ: "JWT", ...header })}.${part({
+    iss: "https://accounts.google.com",
+    aud: CLIENT_ID,
+    sub: "1234567890",
+    name: "Zoë 李",
+    iat: now(),
+    exp: now() + 3600,
+    ...claims,
+  })}`;
+  return `${unsigned}.${signer(Buffer.from(unsigned)).toString("base64url")}`;
+};
+const postGoogle = (token, { headers = {}, extra = {} } = {}) =>
+  postRegister(undefined, { headers, body: JSON.stringify({ google_id_token: token, ...extra }) });
+const googleClient = async (options) => {
+  const res = await postGoogle(idToken(options));
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("cache-control"), "no-store");
+  return res.json();
+};
+
+test("a bad google token is refused", async () => {
+  const res = await retry(() => postRegister(undefined, { headers: {}, body: JSON.stringify({ google_id_token: "a.b.c" }) }));
+  assert.equal(res.status, 401);
+});
+
+test("google sign-in registers, and the same account keeps its id", { skip: !!remote }, async () => {
+  const first = await googleClient();
+  assert.match(first.client_id, /^[\w-]{43}$/);
+  assert.equal((await put(first, "x\n")).status, 201);
+  const again = await googleClient({ claims: { iss: "accounts.google.com", iat: now() - 290 } });
+  assert.deepEqual(again, first);
+  assert.notEqual((await googleClient({ claims: { sub: "other" } })).client_id, first.client_id);
+});
+
+test("bad google tokens are refused", { skip: !!remote }, async () => {
+  const other = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey;
+  const publicPem = google.publicKey.export({ type: "spki", format: "pem" });
+  const cases = {
+    "other issuer": { claims: { iss: "https://example.com" } },
+    "other audience": { claims: { aud: "other" } },
+    "audience list": { claims: { aud: [CLIENT_ID] } },
+    "expired": { claims: { exp: now() - 1 } },
+    "no exp": { claims: { exp: undefined } },
+    "old iat": { claims: { iat: now() - 301 } },
+    "future iat": { claims: { iat: now() + 302 } },
+    "no iat": { claims: { iat: undefined } },
+    "no sub": { claims: { sub: undefined } },
+    "empty sub": { claims: { sub: "" } },
+    "numeric sub": { claims: { sub: 5 } },
+    "alg none": { header: { alg: "none" }, signer: () => Buffer.alloc(0) },
+    "alg HS256": { header: { alg: "HS256" }, signer: (data) => createHmac("sha256", publicPem).update(data).digest() },
+    // Signed with the real key, so only the alg check can refuse it.
+    "alg RS512 label": { header: { alg: "RS512" } },
+    "unknown kid": { header: { kid: "nope" } },
+    "wrong key": { signer: (data) => edSign("sha256", data, other) },
+  };
+  for (const [name, options] of Object.entries(cases))
+    assert.equal((await postGoogle(idToken(options))).status, 401, name);
+});
+
+test("junk google requests never fetch keys", { skip: !!remote }, async () => {
+  const before = stub.certsFetches;
+  const tokens = [5, "", "a.b", "a.b.c", "!!.!!.!!", `${part(null)}.${part(null)}.x`, idToken({ claims: { aud: "other" } })];
+  for (const token of tokens) assert.equal((await postGoogle(token)).status, 401, String(token));
+  for (const field of ["integrity_token", "package_name", "challenge"])
+    assert.equal((await postGoogle(idToken(), { extra: { [field]: "x" } })).status, 401, `both bodies: ${field}`);
+  assert.equal((await postGoogle(idToken(), { headers: buildHeaders() })).status, 401, "both proofs");
+  assert.equal(stub.certsFetches, before);
+});
+
+test("unfetchable google keys are retryable", { skip: !!remote }, async () => {
+  stub.certsStatus = 500;
+  try {
+    assert.equal((await postGoogle(idToken())).status, 503, "keys 500");
+    stub.certsStatus = 200;
+    stub.certsBody = {};
+    assert.equal((await postGoogle(idToken())).status, 503, "no keys in the answer");
+  } finally {
+    stub.certsStatus = 200;
+    stub.certsBody = null;
+  }
+});
+
+test("google keys are cached for max-age", { skip: !!remote }, async () => {
+  stub.certsCache = "public, max-age=2";
+  try {
+    const before = stub.certsFetches;
+    await googleClient();
+    await googleClient();
+    assert.equal(stub.certsFetches, before + 1);
+    await sleep(2100);
+    await googleClient();
+    assert.equal(stub.certsFetches, before + 2);
+    // Age counts against max-age: this copy is already stale when it arrives.
+    await sleep(2100);
+    stub.certsAge = "2";
+    await googleClient();
+    await googleClient();
+    assert.equal(stub.certsFetches, before + 4);
+  } finally {
+    stub.certsCache = "no-store";
+    stub.certsAge = "0";
+    await sleep(2100); // let the cached copy lapse before other tests
   }
 });
 

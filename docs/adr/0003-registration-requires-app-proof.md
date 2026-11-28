@@ -1,6 +1,6 @@
 # ADR-0003: Registration requires proof of one of our builds
 
-**Status:** Accepted. Merged in [PR #6](https://github.com/ronail/playtrail/pull/6) and deployed 2026-11-26 ([evidence](../evidence/2026-11-26-live-checks.md)). Android is not configured; iOS is not built.
+**Status:** Accepted. Merged in [PR #6](https://github.com/ronail/playtrail/pull/6) and deployed 2026-11-26 ([evidence](../evidence/2026-11-26-live-checks.md)). Android is not configured; iOS is not built. Superseded for web by [ADR-0006](0006-google-sign-in.md).
 **Date:** 2026-11-26
 
 ## Context
