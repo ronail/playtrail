@@ -67,7 +67,7 @@ async function register(req: Request, env: Env): Promise<Response> {
   let client_id: string = crypto.randomUUID();
   const google = body.byteLength ? googleRequest(body) : null;
   if (google) {
-    if (hasBuild || "integrity_token" in google) return refuse(401);
+    if (hasBuild || ["package_name", "challenge", "integrity_token"].some((field) => field in google)) return refuse(401);
     const account = await fromGoogle(google.google_id_token, env);
     if (typeof account === "number") return refuse(account);
     // Same account, same ID. The newline cannot appear in a client ID, so this is nobody's upload key.

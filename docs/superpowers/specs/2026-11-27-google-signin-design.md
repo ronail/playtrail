@@ -1,6 +1,6 @@
 # Google sign-in for web registration
 
-Status: proposed, 2026-11-27. Not built.
+Status: approved and built, 2026-11-28. Not deployed.
 
 ## Intent
 

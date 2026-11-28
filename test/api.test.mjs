@@ -65,7 +65,7 @@ const saKey = google && JSON.stringify({
   client_email: "test@example.iam.gserviceaccount.com",
   private_key: google.privateKey.export({ type: "pkcs8", format: "pem" }),
 });
-const stub = { tokenStatus: 200, decodes: 0, certsStatus: 200, certsCache: "no-store", certsFetches: 0 };
+const stub = { tokenStatus: 200, decodes: 0, certsStatus: 200, certsCache: "no-store", certsAge: "0", certsBody: null, certsFetches: 0 };
 const CLIENT_ID = "test-client.apps.googleusercontent.com";
 const KID = "test-kid";
 const validJwt = (jwt = "") => {
@@ -82,7 +82,8 @@ const googleStub = createServer(async (req, res) => {
   if (req.url === "/oauth2/v3/certs") {
     stub.certsFetches++;
     res.setHeader("cache-control", stub.certsCache);
-    return answer(stub.certsStatus, { keys: [{ ...google.publicKey.export({ format: "jwk" }), kid: KID, alg: "RS256", use: "sig" }] });
+    res.setHeader("age", stub.certsAge);
+    return answer(stub.certsStatus, stub.certsBody ?? { keys: [{ ...google.publicKey.export({ format: "jwk" }), kid: KID, alg: "RS256", use: "sig" }] });
   }
   if (req.url === "/token") {
     const form = new URLSearchParams(text);
@@ -371,6 +372,8 @@ test("bad google tokens are refused", { skip: !!remote }, async () => {
     "numeric sub": { claims: { sub: 5 } },
     "alg none": { header: { alg: "none" }, signer: () => Buffer.alloc(0) },
     "alg HS256": { header: { alg: "HS256" }, signer: (data) => createHmac("sha256", publicPem).update(data).digest() },
+    // Signed with the real key, so only the alg check can refuse it.
+    "alg RS512 label": { header: { alg: "RS512" } },
     "unknown kid": { header: { kid: "nope" } },
     "wrong key": { signer: (data) => edSign("sha256", data, other) },
   };
@@ -382,7 +385,8 @@ test("junk google requests never fetch keys", { skip: !!remote }, async () => {
   const before = stub.certsFetches;
   const tokens = [5, "", "a.b", "a.b.c", "!!.!!.!!", `${part(null)}.${part(null)}.x`, idToken({ claims: { aud: "other" } })];
   for (const token of tokens) assert.equal((await postGoogle(token)).status, 401, String(token));
-  assert.equal((await postGoogle(idToken(), { extra: { integrity_token: "x" } })).status, 401, "both bodies");
+  for (const field of ["integrity_token", "package_name", "challenge"])
+    assert.equal((await postGoogle(idToken(), { extra: { [field]: "x" } })).status, 401, `both bodies: ${field}`);
   assert.equal((await postGoogle(idToken(), { headers: buildHeaders() })).status, 401, "both proofs");
   assert.equal(stub.certsFetches, before);
 });
@@ -390,9 +394,13 @@ test("junk google requests never fetch keys", { skip: !!remote }, async () => {
 test("unfetchable google keys are retryable", { skip: !!remote }, async () => {
   stub.certsStatus = 500;
   try {
-    assert.equal((await postGoogle(idToken())).status, 503);
+    assert.equal((await postGoogle(idToken())).status, 503, "keys 500");
+    stub.certsStatus = 200;
+    stub.certsBody = {};
+    assert.equal((await postGoogle(idToken())).status, 503, "no keys in the answer");
   } finally {
     stub.certsStatus = 200;
+    stub.certsBody = null;
   }
 });
 
@@ -406,8 +414,15 @@ test("google keys are cached for max-age", { skip: !!remote }, async () => {
     await sleep(2100);
     await googleClient();
     assert.equal(stub.certsFetches, before + 2);
+    // Age counts against max-age: this copy is already stale when it arrives.
+    await sleep(2100);
+    stub.certsAge = "2";
+    await googleClient();
+    await googleClient();
+    assert.equal(stub.certsFetches, before + 4);
   } finally {
     stub.certsCache = "no-store";
+    stub.certsAge = "0";
     await sleep(2100); // let the cached copy lapse before other tests
   }
 });

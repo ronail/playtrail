@@ -146,7 +146,8 @@ export interface GoogleEnv {
 }
 
 type Jwk = JsonWebKey & { kid?: string };
-// Per isolate. An unknown kid does not refetch: junk must not be able to drive requests to Google.
+// Per isolate. An unknown kid does not refetch. Unsigned tokens with valid claims can still cause
+// a fetch while nothing is cached; only the register limit bounds that.
 let certs: { url: string; keys: Jwk[]; expires: number } | undefined;
 
 async function googleKeys(env: GoogleEnv): Promise<Jwk[]> {
@@ -155,8 +156,9 @@ async function googleKeys(env: GoogleEnv): Promise<Jwk[]> {
   const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
   if (!res.ok) throw new Error(`Google keys: ${res.status}`);
   const { keys } = (await res.json()) as { keys: Jwk[] };
+  if (!Array.isArray(keys)) throw new Error("Google keys: no keys");
   const maxAge = Number(/max-age=(\d+)/.exec(res.headers.get("cache-control") ?? "")?.[1] ?? 0);
-  certs = { url, keys, expires: Date.now() + maxAge * 1000 };
+  certs = { url, keys, expires: Date.now() + (maxAge - Number(res.headers.get("age") ?? 0)) * 1000 };
   return keys;
 }
 
