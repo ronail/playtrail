@@ -1,13 +1,14 @@
-// Proof that a registration comes from one of our own builds.
+// Proof for a registration: a signed-in Google account, or one of our own builds.
 export const hmacKey = (raw: BufferSource, use: "sign" | "verify") =>
   crypto.subtle.importKey("raw", raw, { name: "HMAC", hash: "SHA-256" }, false, [use]);
 
 const WINDOW = 300; // seconds
 const enc = new TextEncoder();
 const fromBase64 = (text: string) => Uint8Array.from(atob(text), (c) => c.charCodeAt(0));
+const fromBase64Url = (text: string) => fromBase64(text.replace(/-/g, "+").replace(/_/g, "/"));
 const fresh = (seconds: number) => Math.abs(Math.floor(Date.now() / 1000) - seconds) <= WINDOW;
 
-const toBase64Url = (bytes: ArrayBuffer | Uint8Array) =>
+export const toBase64Url = (bytes: ArrayBuffer | Uint8Array) =>
   btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 
 // Stateless: the challenge carries its own time and MAC. The newline cannot appear in a
@@ -43,7 +44,7 @@ async function validChallenge(value: string, masterKey: string): Promise<boolean
   if (!/^\d+$/.test(ts) || !fresh(Number(ts))) return false;
   let bytes: Uint8Array;
   try {
-    bytes = fromBase64(mac.replace(/-/g, "+").replace(/_/g, "/"));
+    bytes = fromBase64Url(mac);
   } catch {
     return false;
   }
@@ -55,7 +56,7 @@ export interface PlayEnv {
   MASTER_KEY: string;
   ANDROID_APPS?: string; // {"<package>":["<certificate digest>"]}
   GOOGLE_SA_KEY?: string; // service account JSON
-  GOOGLE_BASE?: string; // tests only: replaces both Google origins
+  GOOGLE_BASE?: string; // tests only: replaces the Google origins
 }
 
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -137,4 +138,64 @@ export async function fromPlay(body: Uint8Array, env: PlayEnv): Promise<200 | 40
     appIntegrity.certificateSha256Digest?.some((digest) => apps[pkg].includes(digest)) &&
     deviceIntegrity?.deviceRecognitionVerdict?.includes("MEETS_DEVICE_INTEGRITY");
   return ok ? 200 : 401;
+}
+
+export interface GoogleEnv {
+  GOOGLE_CLIENT_ID?: string;
+  GOOGLE_BASE?: string; // tests only: replaces the Google origins
+}
+
+type Jwk = JsonWebKey & { kid?: string };
+// Per isolate. An unknown kid does not refetch: junk must not be able to drive requests to Google.
+let certs: { url: string; keys: Jwk[]; expires: number } | undefined;
+
+async function googleKeys(env: GoogleEnv): Promise<Jwk[]> {
+  const url = `${env.GOOGLE_BASE ?? "https://www.googleapis.com"}/oauth2/v3/certs`;
+  if (certs?.url === url && Date.now() < certs.expires) return certs.keys;
+  const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+  if (!res.ok) throw new Error(`Google keys: ${res.status}`);
+  const { keys } = (await res.json()) as { keys: Jwk[] };
+  const maxAge = Number(/max-age=(\d+)/.exec(res.headers.get("cache-control") ?? "")?.[1] ?? 0);
+  certs = { url, keys, expires: Date.now() + maxAge * 1000 };
+  return keys;
+}
+
+// Returns the account's subject. Nothing else in the token is read, stored or logged.
+export async function fromGoogle(token: unknown, env: GoogleEnv): Promise<{ sub: string } | 401 | 503> {
+  if (!env.GOOGLE_CLIENT_ID || typeof token !== "string") return 401;
+  const parts = token.split(".");
+  if (parts.length !== 3) return 401;
+  let header: { alg?: unknown; kid?: unknown };
+  let claims: { iss?: unknown; aud?: unknown; exp?: unknown; iat?: unknown; sub?: unknown };
+  let signature: Uint8Array;
+  try {
+    const json = (text: string) => JSON.parse(new TextDecoder().decode(fromBase64Url(text))) ?? {};
+    [header, claims] = [json(parts[0]), json(parts[1])];
+    signature = fromBase64Url(parts[2]);
+  } catch {
+    return 401;
+  }
+  const { iss, aud, exp, iat, sub } = claims;
+  // All before fetching keys.
+  const ok =
+    header.alg === "RS256" &&
+    (iss === "https://accounts.google.com" || iss === "accounts.google.com") &&
+    aud === env.GOOGLE_CLIENT_ID &&
+    typeof exp === "number" && exp > Date.now() / 1000 &&
+    // Google's token lives about an hour; this is what limits a stolen one.
+    typeof iat === "number" && fresh(iat);
+  if (!ok || typeof sub !== "string" || !sub) return 401;
+
+  let keys: Jwk[];
+  try {
+    keys = await googleKeys(env);
+  } catch (err) {
+    console.error(err);
+    return 503;
+  }
+  const jwk = keys.find((key) => key.kid === header.kid);
+  if (!jwk) return 401;
+  const key = await crypto.subtle.importKey("jwk", jwk, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["verify"]);
+  const signed = enc.encode(`${parts[0]}.${parts[1]}`);
+  return (await crypto.subtle.verify("RSASSA-PKCS1-v1_5", key, signature, signed)) ? { sub } : 401;
 }
